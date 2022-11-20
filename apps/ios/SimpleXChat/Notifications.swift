@@ -92,7 +92,7 @@ public func createConnectionEventNtf(_ connEntity: ConnectionEntity) -> UNMutabl
     var body: String? = nil
     var targetContentIdentifier: String? = nil
     switch connEntity {
-    case let .rcvDirectMsgConnection(_, contact):
+    case let .rcvDirectMsgConnection(contact):
         if let contact = contact {
             title = hideContent ? contactHidden : "\(contact.chatViewName):"
             targetContentIdentifier = contact.id
@@ -100,7 +100,7 @@ public func createConnectionEventNtf(_ connEntity: ConnectionEntity) -> UNMutabl
             title = NSLocalizedString("New contact:", comment: "notification")
         }
         body = NSLocalizedString("message received", comment: "notification")
-    case let .rcvGroupMsgConnection(_, groupInfo, groupMember):
+    case let .rcvGroupMsgConnection(groupInfo, groupMember):
         title = groupMsgNtfTitle(groupInfo, groupMember, hideContent: hideContent)
         body = NSLocalizedString("message received", comment: "notification")
         targetContentIdentifier = groupInfo.id
@@ -112,10 +112,30 @@ public func createConnectionEventNtf(_ connEntity: ConnectionEntity) -> UNMutabl
         title = NSLocalizedString("New contact request", comment: "notification")
     }
     return createNotification(
-        categoryIdentifier: ntfCategoryCallInvitation,
+        categoryIdentifier: ntfCategoryConnectionEvent,
         title: title,
         body: body,
         targetContentIdentifier: targetContentIdentifier
+    )
+}
+
+public func createErrorNtf(_ dbStatus: DBMigrationResult) -> UNMutableNotificationContent {
+    var title: String
+    switch dbStatus {
+    case .errorNotADatabase:
+        title = NSLocalizedString("Encrypted message: no passphrase", comment: "notification")
+    case .error:
+        title = NSLocalizedString("Encrypted message: database error", comment: "notification")
+    case .errorKeychain:
+        title = NSLocalizedString("Encrypted message: keychain error", comment: "notification")
+    case .unknown:
+        title = NSLocalizedString("Encrypted message: unexpected error", comment: "notification")
+    case .ok:
+        title = NSLocalizedString("Encrypted message or another event", comment: "notification")
+    }
+    return createNotification(
+        categoryIdentifier: ntfCategoryConnectionEvent,
+        title: title
     )
 }
 

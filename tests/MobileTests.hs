@@ -7,6 +7,7 @@ import ChatTests
 import Control.Monad.Except
 import Simplex.Chat.Mobile
 import Simplex.Chat.Store
+import Simplex.Chat.Types (Profile (..))
 import Test.Hspec
 
 mobileTests :: Spec
@@ -31,9 +32,9 @@ activeUserExists = "{\"resp\":{\"type\":\"chatCmdError\",\"chatError\":{\"type\"
 
 activeUser :: String
 #if defined(darwin_HOST_OS) && defined(swiftJSON)
-activeUser = "{\"resp\":{\"activeUser\":{\"user\":{\"userId\":1,\"userContactId\":1,\"localDisplayName\":\"alice\",\"profile\":{\"displayName\":\"alice\",\"fullName\":\"Alice\"},\"activeUser\":true}}}}"
+activeUser = "{\"resp\":{\"activeUser\":{\"user\":{\"userId\":1,\"userContactId\":1,\"localDisplayName\":\"alice\",\"profile\":{\"profileId\":1,\"displayName\":\"alice\",\"fullName\":\"Alice\",\"localAlias\":\"\"},\"activeUser\":true}}}}"
 #else
-activeUser = "{\"resp\":{\"type\":\"activeUser\",\"user\":{\"userId\":1,\"userContactId\":1,\"localDisplayName\":\"alice\",\"profile\":{\"displayName\":\"alice\",\"fullName\":\"Alice\"},\"activeUser\":true}}}"
+activeUser = "{\"resp\":{\"type\":\"activeUser\",\"user\":{\"userId\":1,\"userContactId\":1,\"localDisplayName\":\"alice\",\"profile\":{\"profileId\":1,\"displayName\":\"alice\",\"fullName\":\"Alice\",\"localAlias\":\"\"},\"activeUser\":true}}}"
 #endif
 
 chatStarted :: String
@@ -50,18 +51,25 @@ contactSubSummary = "{\"resp\":{\"contactSubSummary\":{\"contactSubscriptions\":
 contactSubSummary = "{\"resp\":{\"type\":\"contactSubSummary\",\"contactSubscriptions\":[]}}"
 #endif
 
-memberSubErrors :: String
+memberSubSummary :: String
 #if defined(darwin_HOST_OS) && defined(swiftJSON)
-memberSubErrors = "{\"resp\":{\"memberSubErrors\":{\"memberSubErrors\":[]}}}"
+memberSubSummary = "{\"resp\":{\"memberSubSummary\":{\"memberSubscriptions\":[]}}}"
 #else
-memberSubErrors = "{\"resp\":{\"type\":\"memberSubErrors\",\"memberSubErrors\":[]}}"
+memberSubSummary = "{\"resp\":{\"type\":\"memberSubSummary\",\"memberSubscriptions\":[]}}"
+#endif
+
+userContactSubSummary :: String
+#if defined(darwin_HOST_OS) && defined(swiftJSON)
+userContactSubSummary = "{\"resp\":{\"userContactSubSummary\":{\"userContactSubscriptions\":[]}}}"
+#else
+userContactSubSummary = "{\"resp\":{\"type\":\"userContactSubSummary\",\"userContactSubscriptions\":[]}}"
 #endif
 
 pendingSubSummary :: String
 #if defined(darwin_HOST_OS) && defined(swiftJSON)
-pendingSubSummary = "{\"resp\":{\"pendingSubSummary\":{\"pendingSubStatus\":[]}}}"
+pendingSubSummary = "{\"resp\":{\"pendingSubSummary\":{\"pendingSubscriptions\":[]}}}"
 #else
-pendingSubSummary = "{\"resp\":{\"type\":\"pendingSubSummary\",\"pendingSubStatus\":[]}}"
+pendingSubSummary = "{\"resp\":{\"type\":\"pendingSubSummary\",\"pendingSubscriptions\":[]}}"
 #endif
 
 parsedMarkdown :: String
@@ -73,7 +81,8 @@ parsedMarkdown = "{\"formattedText\":[{\"format\":{\"type\":\"bold\"},\"text\":\
 
 testChatApiNoUser :: IO ()
 testChatApiNoUser = withTmpFiles $ do
-  cc <- chatInit testDBPrefix
+  Right cc <- chatMigrateInit testDBPrefix ""
+  Left (DBMErrorNotADatabase _) <- chatMigrateInit testDBPrefix "myKey"
   chatSendCmd cc "/u" `shouldReturn` noActiveUser
   chatSendCmd cc "/_start" `shouldReturn` noActiveUser
   chatSendCmd cc "/u alice Alice" `shouldReturn` activeUser
@@ -81,15 +90,19 @@ testChatApiNoUser = withTmpFiles $ do
 
 testChatApi :: IO ()
 testChatApi = withTmpFiles $ do
-  let f = chatStoreFile $ testDBPrefix <> "1"
-  st <- createStore f True
-  Right _ <- withTransaction st $ \db -> runExceptT $ createUser db aliceProfile True
-  cc <- chatInit $ testDBPrefix <> "1"
+  let dbPrefix = testDBPrefix <> "1"
+      f = chatStoreFile dbPrefix
+  st <- createChatStore f "myKey" True
+  Right _ <- withTransaction st $ \db -> runExceptT $ createUser db aliceProfile {preferences = Nothing} True
+  Right cc <- chatMigrateInit dbPrefix "myKey"
+  Left (DBMErrorNotADatabase _) <- chatMigrateInit dbPrefix ""
+  Left (DBMErrorNotADatabase _) <- chatMigrateInit dbPrefix "anotherKey"
   chatSendCmd cc "/u" `shouldReturn` activeUser
   chatSendCmd cc "/u alice Alice" `shouldReturn` activeUserExists
   chatSendCmd cc "/_start" `shouldReturn` chatStarted
   chatRecvMsg cc `shouldReturn` contactSubSummary
-  chatRecvMsg cc `shouldReturn` memberSubErrors
+  chatRecvMsg cc `shouldReturn` userContactSubSummary
+  chatRecvMsg cc `shouldReturn` memberSubSummary
   chatRecvMsgWait cc 10000 `shouldReturn` pendingSubSummary
   chatRecvMsgWait cc 10000 `shouldReturn` ""
   chatParseMarkdown "hello" `shouldBe` "{}"

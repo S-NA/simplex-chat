@@ -14,8 +14,23 @@ struct CallSettings: View {
     var body: some View {
         VStack {
             List {
-                Section("Settings") {
+                Section {
                     Toggle("Connect via relay", isOn: $webrtcPolicyRelay)
+
+                    NavigationLink {
+                        RTCServers()
+                            .navigationTitle("Your ICE servers")
+                    } label: {
+                        Text("WebRTC ICE servers")
+                    }
+                } header: {
+                    Text("Settings")
+                } footer: {
+                    if webrtcPolicyRelay {
+                        Text("Relay server protects your IP address, but it can observe the duration of the call.")
+                    } else {
+                        Text("Relay server is only used if necessary. Another party can observe your IP address.")
+                    }
                 }
 
                 Section("Limitations") {
@@ -31,12 +46,12 @@ struct CallSettings: View {
             }
         }
     }
+}
 
-    private func textListItem(_ n: String, _ text: LocalizedStringKey) -> some View {
-        ZStack(alignment: .topLeading) {
-            Text(n)
-            Text(text).frame(maxWidth: .infinity, alignment: .leading).padding(.leading, 20)
-        }
+func textListItem(_ n: String, _ text: LocalizedStringKey) -> some View {
+    ZStack(alignment: .topLeading) {
+        Text(n)
+        Text(text).frame(maxWidth: .infinity, alignment: .leading).padding(.leading, 20)
     }
 }
 

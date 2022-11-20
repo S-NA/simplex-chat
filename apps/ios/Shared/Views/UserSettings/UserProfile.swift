@@ -77,7 +77,7 @@ struct UserProfile: View {
                     profileNameView("Display name:", user.profile.displayName)
                     profileNameView("Full name:", user.profile.fullName)
                     Button("Edit") {
-                        profile = user.profile
+                        profile = fromLocalProfile(user.profile)
                         editProfile = true
                     }
                 }
@@ -114,7 +114,7 @@ struct UserProfile: View {
         }
     }
 
-    func profileNameTextEdit(_ label: String, _ name: Binding<String>) -> some View {
+    func profileNameTextEdit(_ label: LocalizedStringKey, _ name: Binding<String>) -> some View {
         TextField(label, text: name)
             .textInputAutocapitalization(.never)
             .disableAutocorrection(true)
@@ -122,7 +122,7 @@ struct UserProfile: View {
             .padding(.leading, 28)
     }
 
-    func profileNameView(_ label: String, _ name: String) -> some View {
+    func profileNameView(_ label: LocalizedStringKey, _ name: String) -> some View {
         HStack {
             Text(label)
             Text(name).fontWeight(.bold)
@@ -130,25 +130,8 @@ struct UserProfile: View {
         .padding(.bottom)
     }
 
-    func profileImageView(_ imageStr: String?) -> some View {
-        ProfileImage(imageStr: imageStr)
-            .aspectRatio(1, contentMode: .fit)
-            .frame(maxWidth: 192, maxHeight: 192)
-    }
-
-    func editImageButton(action: @escaping () -> Void) -> some View {
-        Button {
-            action()
-        } label: {
-            Image(systemName: "camera")
-                .resizable()
-                .aspectRatio(contentMode: .fit)
-                .frame(width: 48)
-        }
-    }
-    
     func startEditingImage(_ user: User) {
-        profile = user.profile
+        profile = fromLocalProfile(user.profile)
         editProfile = true
         showChooseSource = true
     }
@@ -158,15 +141,34 @@ struct UserProfile: View {
             do {
                 if let newProfile = try await apiUpdateProfile(profile: profile) {
                     DispatchQueue.main.async {
-                        chatModel.currentUser?.profile = newProfile
+                        if let profileId = chatModel.currentUser?.profile.profileId {
+                            chatModel.currentUser?.profile = toLocalProfile(profileId, newProfile, "")
+                        }
                         profile = newProfile
                     }
                 }
             } catch {
-                logger.error("UserProfile apiUpdateProfile error: \(error.localizedDescription)")
+                logger.error("UserProfile apiUpdateProfile error: \(responseError(error))")
             }
             editProfile = false
         }
+    }
+}
+
+func profileImageView(_ imageStr: String?) -> some View {
+    ProfileImage(imageStr: imageStr)
+        .aspectRatio(1, contentMode: .fit)
+        .frame(maxWidth: 192, maxHeight: 192)
+}
+
+func editImageButton(action: @escaping () -> Void) -> some View {
+    Button {
+        action()
+    } label: {
+        Image(systemName: "camera")
+            .resizable()
+            .aspectRatio(contentMode: .fit)
+            .frame(width: 48)
     }
 }
 

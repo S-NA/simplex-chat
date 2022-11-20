@@ -9,6 +9,7 @@ import Simplex.Chat.Core
 import Simplex.Chat.Options
 import Simplex.Chat.Terminal
 import Simplex.Chat.View (serializeChatResponse)
+import Simplex.Messaging.Client (NetworkConfig (..))
 import System.Directory (getAppUserDataDirectory)
 import System.Terminal (withTerminal)
 
@@ -24,13 +25,20 @@ main = do
         welcome opts
         t <- withTerminal pure
         simplexChatTerminal terminalChatConfig opts t
-    else simplexChatCore terminalChatConfig opts Nothing $ \_ cc -> do
+    else simplexChatCore terminalChatConfig opts Nothing $ \user cc -> do
       r <- sendChatCmd cc chatCmd
-      putStrLn $ serializeChatResponse r
+      putStrLn $ serializeChatResponse (Just user) r
       threadDelay $ chatCmdDelay opts * 1000000
 
 welcome :: ChatOpts -> IO ()
-welcome ChatOpts {dbFilePrefix} = do
-  putStrLn $ "SimpleX Chat v" ++ versionNumber
-  putStrLn $ "db: " <> dbFilePrefix <> "_chat.db, " <> dbFilePrefix <> "_agent.db"
-  putStrLn "type \"/help\" or \"/h\" for usage info"
+welcome ChatOpts {dbFilePrefix, networkConfig} =
+  mapM_
+    putStrLn
+    [ "SimpleX Chat v" ++ versionNumber,
+      "db: " <> dbFilePrefix <> "_chat.db, " <> dbFilePrefix <> "_agent.db",
+      maybe
+        "direct network connection - use `/network` command or `-x` CLI option to connect via SOCKS5 at :9050"
+        (("using SOCKS5 proxy " <>) . show)
+        (socksProxy networkConfig),
+      "type \"/help\" or \"/h\" for usage info"
+    ]

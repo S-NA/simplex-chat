@@ -4,14 +4,18 @@ import android.app.Application
 import android.net.LocalServerSocket
 import android.util.Log
 import androidx.lifecycle.*
+import androidx.work.*
 import chat.simplex.app.model.*
-import chat.simplex.app.views.helpers.getFilesDirectory
-import chat.simplex.app.views.helpers.withApi
+import chat.simplex.app.views.helpers.*
 import chat.simplex.app.views.onboarding.OnboardingStage
+import chat.simplex.app.views.usersettings.NotificationsMode
+import kotlinx.coroutines.*
+import kotlinx.serialization.decodeFromString
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.util.*
 import java.util.concurrent.Semaphore
+import java.util.concurrent.TimeUnit
 import kotlin.concurrent.thread
 
 const val TAG = "SIMPLEX"
@@ -23,21 +27,53 @@ external fun pipeStdOutToSocket(socketName: String) : Int
 
 // SimpleX API
 typealias ChatCtrl = Long
-external fun chatInit(path: String): ChatCtrl
+external fun chatMigrateInit(dbPath: String, dbKey: String): Array<Any>
 external fun chatSendCmd(ctrl: ChatCtrl, msg: String): String
 external fun chatRecvMsg(ctrl: ChatCtrl): String
 external fun chatRecvMsgWait(ctrl: ChatCtrl, timeout: Int): String
 external fun chatParseMarkdown(str: String): String
 
 class SimplexApp: Application(), LifecycleEventObserver {
-  val chatController: ChatController by lazy {
-    val ctrl = chatInit(getFilesDirectory(applicationContext))
-    ChatController(ctrl, ntfManager, applicationContext, appPreferences)
+  lateinit var chatController: ChatController
+
+  fun initChatController(useKey: String? = null, startChat: Boolean = true) {
+    val dbKey = useKey ?: DatabaseUtils.useDatabaseKey() ?: ""
+    val dbAbsolutePathPrefix = getFilesDirectory(SimplexApp.context)
+    val migrated: Array<Any> = chatMigrateInit(dbAbsolutePathPrefix, dbKey)
+    val res: DBMigrationResult = kotlin.runCatching {
+      json.decodeFromString<DBMigrationResult>(migrated[0] as String)
+    }.getOrElse { DBMigrationResult.Unknown(migrated[0] as String) }
+    val ctrl = if (res is DBMigrationResult.OK) {
+      migrated[1] as Long
+    } else null
+    if (::chatController.isInitialized) {
+      chatController.ctrl = ctrl
+    } else {
+      chatController = ChatController(ctrl, ntfManager, applicationContext, appPreferences)
+    }
+    chatModel.chatDbEncrypted.value = dbKey != ""
+    chatModel.chatDbStatus.value = res
+    if (res != DBMigrationResult.OK) {
+      Log.d(TAG, "Unable to migrate successfully: $res")
+    } else if (startChat) {
+      // If we migrated successfully means previous re-encryption process on database level finished successfully too
+      if (appPreferences.encryptionStartedAt.get() != null) appPreferences.encryptionStartedAt.set(null)
+      withApi {
+        val user = chatController.apiGetActiveUser()
+        if (user == null) {
+          chatModel.onboardingStage.value = OnboardingStage.Step1_SimpleXInfo
+        } else {
+          chatController.startChat(user)
+          chatController.showBackgroundServiceNoticeIfNeeded()
+          if (appPreferences.notificationsMode.get() == NotificationsMode.SERVICE.name)
+            SimplexService.start(applicationContext)
+        }
+      }
+    }
   }
 
-  val chatModel: ChatModel by lazy {
-    chatController.chatModel
-  }
+  val chatModel: ChatModel
+    get() = chatController.chatModel
 
   private val ntfManager: NtfManager by lazy {
     NtfManager(applicationContext, appPreferences)
@@ -50,40 +86,85 @@ class SimplexApp: Application(), LifecycleEventObserver {
   override fun onCreate() {
     super.onCreate()
     context = this
+    initChatController()
     ProcessLifecycleOwner.get().lifecycle.addObserver(this)
-    withApi {
-      val user = chatController.apiGetActiveUser()
-      if (user == null) {
-        chatModel.onboardingStage.value = OnboardingStage.Step1_SimpleXInfo
-      } else {
-        chatController.startChat(user)
-        chatController.showBackgroundServiceNoticeIfNeeded()
-      }
-    }
   }
 
   override fun onStateChanged(source: LifecycleOwner, event: Lifecycle.Event) {
     Log.d(TAG, "onStateChanged: $event")
     withApi {
       when (event) {
-        Lifecycle.Event.ON_STOP ->
-          if (appPreferences.runServiceInBackground.get() && chatModel.chatRunning.value != false) SimplexService.start(applicationContext)
-        Lifecycle.Event.ON_START ->
-          SimplexService.stop(applicationContext)
-        Lifecycle.Event.ON_RESUME ->
+        Lifecycle.Event.ON_START -> {
+          if (chatModel.chatRunning.value == true) {
+            kotlin.runCatching {
+              val chats = chatController.apiGetChats()
+              chatModel.updateChats(chats)
+            }.onFailure { Log.e(TAG, it.stackTraceToString()) }
+          }
+        }
+        Lifecycle.Event.ON_RESUME -> {
           if (chatModel.onboardingStage.value == OnboardingStage.OnboardingComplete) {
             chatController.showBackgroundServiceNoticeIfNeeded()
           }
+          /**
+           * We're starting service here instead of in [Lifecycle.Event.ON_START] because
+           * after calling [ChatController.showBackgroundServiceNoticeIfNeeded] notification mode in prefs can be changed.
+           * It can happen when app was started and a user enables battery optimization while app in background
+           * */
+          if (chatModel.chatRunning.value != false && appPreferences.notificationsMode.get() == NotificationsMode.SERVICE.name)
+            SimplexService.start(applicationContext)
+        }
         else -> {}
       }
     }
+  }
+
+  fun allowToStartServiceAfterAppExit() = with(chatModel.controller) {
+    appPrefs.notificationsMode.get() == NotificationsMode.SERVICE.name &&
+        (!NotificationsMode.SERVICE.requiresIgnoringBattery || isIgnoringBatteryOptimizations(chatModel.controller.appContext))
+  }
+
+  private fun allowToStartPeriodically() = with(chatModel.controller) {
+    appPrefs.notificationsMode.get() == NotificationsMode.PERIODIC.name &&
+        (!NotificationsMode.PERIODIC.requiresIgnoringBattery || isIgnoringBatteryOptimizations(chatModel.controller.appContext))
+  }
+
+  /*
+  * It takes 1-10 milliseconds to process this function. Better to do it in a background thread
+  * */
+  fun schedulePeriodicServiceRestartWorker() = CoroutineScope(Dispatchers.Default).launch {
+    if (!allowToStartServiceAfterAppExit()) {
+      return@launch
+    }
+    val workerVersion = chatController.appPrefs.autoRestartWorkerVersion.get()
+    val workPolicy = if (workerVersion == SimplexService.SERVICE_START_WORKER_VERSION) {
+      Log.d(TAG, "ServiceStartWorker version matches: choosing KEEP as existing work policy")
+      ExistingPeriodicWorkPolicy.KEEP
+    } else {
+      Log.d(TAG, "ServiceStartWorker version DOES NOT MATCH: choosing REPLACE as existing work policy")
+      chatController.appPrefs.autoRestartWorkerVersion.set(SimplexService.SERVICE_START_WORKER_VERSION)
+      ExistingPeriodicWorkPolicy.REPLACE
+    }
+    val work = PeriodicWorkRequestBuilder<SimplexService.ServiceStartWorker>(SimplexService.SERVICE_START_WORKER_INTERVAL_MINUTES, TimeUnit.MINUTES)
+      .addTag(SimplexService.TAG)
+      .addTag(SimplexService.SERVICE_START_WORKER_WORK_NAME_PERIODIC)
+      .build()
+    Log.d(TAG, "ServiceStartWorker: Scheduling period work every ${SimplexService.SERVICE_START_WORKER_INTERVAL_MINUTES} minutes")
+    WorkManager.getInstance(context)?.enqueueUniquePeriodicWork(SimplexService.SERVICE_START_WORKER_WORK_NAME_PERIODIC, workPolicy, work)
+  }
+
+  fun schedulePeriodicWakeUp() = CoroutineScope(Dispatchers.Default).launch {
+    if (!allowToStartPeriodically()) {
+      return@launch
+    }
+    MessagesFetcherWorker.scheduleWork()
   }
 
   companion object {
     lateinit var context: SimplexApp private set
 
     init {
-      val socketName = "local.socket.address.listen.native.cmd2"
+      val socketName = BuildConfig.APPLICATION_ID + ".local.socket.address.listen.native.cmd2"
       val s = Semaphore(0)
       thread(name="stdout/stderr pipe") {
         Log.d(TAG, "starting server")
@@ -97,12 +178,13 @@ class SimplexApp: Application(), LifecycleEventObserver {
           val inStream = receiver.inputStream
           val inStreamReader = InputStreamReader(inStream)
           val input = BufferedReader(inStreamReader)
-
+          Log.d(TAG, "starting receiver loop")
           while (true) {
             val line = input.readLine() ?: break
             Log.w("$TAG (stdout/stderr)", line)
             logbuffer.add(line)
           }
+          Log.w(TAG, "exited receiver loop")
         }
       }
 

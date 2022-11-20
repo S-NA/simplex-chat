@@ -1,38 +1,38 @@
 package chat.simplex.app.views.usersettings
 
+import SectionDivider
+import SectionSpacer
+import SectionView
 import androidx.compose.foundation.layout.*
-import androidx.compose.material.*
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.Image
-import androidx.compose.material.icons.outlined.TravelExplore
+import androidx.compose.material.icons.outlined.*
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.unit.dp
 import chat.simplex.app.R
 import chat.simplex.app.model.ChatModel
+import chat.simplex.app.views.helpers.AppBarTitle
 
 @Composable
 fun PrivacySettingsView(chatModel: ChatModel, setPerformLA: (Boolean) -> Unit) {
-  @Composable fun divider() = Divider(Modifier.padding(horizontal = 8.dp))
   Column(
     Modifier.fillMaxWidth(),
     horizontalAlignment = Alignment.Start
   ) {
-    Text(
-      stringResource(R.string.your_privacy),
-      style = MaterialTheme.typography.h1,
-      modifier = Modifier.padding(start = 16.dp, bottom = 24.dp)
-    )
-    SettingsSectionView(stringResource(R.string.settings_section_title_device)) {
+    AppBarTitle(stringResource(R.string.your_privacy))
+    SectionView(stringResource(R.string.settings_section_title_device)) {
       ChatLockItem(chatModel.performLA, setPerformLA)
     }
-    Spacer(Modifier.height(30.dp))
+    SectionSpacer()
 
-    SettingsSectionView(stringResource(R.string.settings_section_title_chats)) {
+    SectionView(stringResource(R.string.settings_section_title_chats)) {
       SettingsPreferenceItem(Icons.Outlined.Image, stringResource(R.string.auto_accept_images), chatModel.controller.appPrefs.privacyAcceptImages)
-      divider()
+      SectionDivider()
+      if (chatModel.controller.appPrefs.developerTools.get()) {
+        SettingsPreferenceItem(Icons.Outlined.ImageAspectRatio, stringResource(R.string.transfer_images_faster), chatModel.controller.appPrefs.privacyTransferImagesInline)
+        SectionDivider()
+      }
       SettingsPreferenceItem(Icons.Outlined.TravelExplore, stringResource(R.string.send_link_previews), chatModel.controller.appPrefs.privacyLinkPreviews)
     }
   }

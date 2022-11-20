@@ -1,11 +1,11 @@
 package chat.simplex.app.views.chatlist
 
 import android.content.res.Configuration
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.*
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.*
 import androidx.compose.material.icons.outlined.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -16,45 +16,47 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import chat.simplex.app.R
 import chat.simplex.app.model.*
-import chat.simplex.app.ui.theme.SimpleXTheme
-import chat.simplex.app.ui.theme.WarningOrange
-import chat.simplex.app.views.chat.clearChatDialog
-import chat.simplex.app.views.chat.deleteContactDialog
+import chat.simplex.app.ui.theme.*
+import chat.simplex.app.views.chat.*
+import chat.simplex.app.views.chat.group.deleteGroupDialog
+import chat.simplex.app.views.chat.group.leaveGroupDialog
 import chat.simplex.app.views.chat.item.ItemAction
 import chat.simplex.app.views.helpers.*
+import chat.simplex.app.views.newchat.ContactConnectionInfoView
 import kotlinx.coroutines.delay
 import kotlinx.datetime.Clock
 
 @Composable
 fun ChatListNavLinkView(chat: Chat, chatModel: ChatModel) {
   val showMenu = remember { mutableStateOf(false) }
-  var showMarkRead by remember { mutableStateOf(false) }
+  val showMarkRead = remember(chat.chatStats.unreadCount, chat.chatStats.unreadChat) {
+    chat.chatStats.unreadCount > 0 || chat.chatStats.unreadChat
+  }
   val stopped = chatModel.chatRunning.value == false
-  LaunchedEffect(chat.id, chat.chatStats.unreadCount > 0) {
+  LaunchedEffect(chat.id) {
     showMenu.value = false
     delay(500L)
-    showMarkRead = chat.chatStats.unreadCount > 0
   }
   when (chat.chatInfo) {
     is ChatInfo.Direct ->
       ChatListNavLinkLayout(
-        chatLinkPreview = { ChatPreviewView(chat, stopped) },
-        click = { openOrPendingChat(chat.chatInfo, chatModel) },
+        chatLinkPreview = { ChatPreviewView(chat, chatModel.incognito.value, chatModel.currentUser.value?.profile?.displayName, stopped) },
+        click = { directChatAction(chat.chatInfo, chatModel) },
         dropdownMenuItems = { ContactMenuItems(chat, chatModel, showMenu, showMarkRead) },
         showMenu,
         stopped
       )
     is ChatInfo.Group ->
       ChatListNavLinkLayout(
-        chatLinkPreview = { ChatPreviewView(chat, stopped) },
-        click = { openOrPendingChat(chat.chatInfo, chatModel) },
-        dropdownMenuItems = { GroupMenuItems(chat, chatModel, showMenu, showMarkRead) },
+        chatLinkPreview = { ChatPreviewView(chat, chatModel.incognito.value, chatModel.currentUser.value?.profile?.displayName, stopped) },
+        click = { groupChatAction(chat.chatInfo.groupInfo, chatModel) },
+        dropdownMenuItems = { GroupMenuItems(chat, chat.chatInfo.groupInfo, chatModel, showMenu, showMarkRead) },
         showMenu,
         stopped
       )
     is ChatInfo.ContactRequest ->
       ChatListNavLinkLayout(
-        chatLinkPreview = { ContactRequestView(chat.chatInfo) },
+        chatLinkPreview = { ContactRequestView(chatModel.incognito.value, chat.chatInfo) },
         click = { contactRequestAlertDialog(chat.chatInfo, chatModel) },
         dropdownMenuItems = { ContactRequestMenuItems(chat.chatInfo, chatModel, showMenu) },
         showMenu,
@@ -63,7 +65,11 @@ fun ChatListNavLinkView(chat: Chat, chatModel: ChatModel) {
     is ChatInfo.ContactConnection ->
       ChatListNavLinkLayout(
         chatLinkPreview = { ContactConnectionView(chat.chatInfo.contactConnection) },
-        click = { contactConnectionAlertDialog(chat.chatInfo.contactConnection, chatModel) },
+        click = {
+          ModalManager.shared.showModalCloseable(true) { close ->
+            ContactConnectionInfoView(chatModel, chat.chatInfo.contactConnection.connReqInv, chat.chatInfo.contactConnection, false, close)
+          }
+        },
         dropdownMenuItems = { ContactConnectionMenuItems(chat.chatInfo, chatModel, showMenu) },
         showMenu,
         stopped
@@ -71,11 +77,19 @@ fun ChatListNavLinkView(chat: Chat, chatModel: ChatModel) {
   }
 }
 
-fun openOrPendingChat(chatInfo: ChatInfo, chatModel: ChatModel) {
+fun directChatAction(chatInfo: ChatInfo, chatModel: ChatModel) {
   if (chatInfo.ready) {
     withApi { openChat(chatInfo, chatModel) }
   } else {
     pendingContactAlertDialog(chatInfo, chatModel)
+  }
+}
+
+fun groupChatAction(groupInfo: GroupInfo, chatModel: ChatModel) {
+  when (groupInfo.membership.memberStatus) {
+    GroupMemberStatus.MemInvited -> acceptGroupInvitationAlertDialog(groupInfo, chatModel)
+    GroupMemberStatus.MemAccepted -> groupInvitationAcceptedAlert()
+    else -> withApi { openChat(ChatInfo.Group(groupInfo), chatModel) }
   }
 }
 
@@ -88,21 +102,116 @@ suspend fun openChat(chatInfo: ChatInfo, chatModel: ChatModel) {
   }
 }
 
+suspend fun apiLoadPrevMessages(chatInfo: ChatInfo, chatModel: ChatModel, beforeChatItemId: Long, search: String) {
+  val pagination = ChatPagination.Before(beforeChatItemId, ChatPagination.PRELOAD_COUNT)
+  val chat = chatModel.controller.apiGetChat(chatInfo.chatType, chatInfo.apiId, pagination, search) ?: return
+  chatModel.chatItems.addAll(0, chat.chatItems)
+}
+
+suspend fun apiFindMessages(chatInfo: ChatInfo, chatModel: ChatModel, search: String) {
+  val chat = chatModel.controller.apiGetChat(chatInfo.chatType, chatInfo.apiId, search = search) ?: return
+  chatModel.chatItems.clear()
+  chatModel.chatItems.addAll(0, chat.chatItems)
+}
+
+suspend fun setGroupMembers(groupInfo: GroupInfo, chatModel: ChatModel) {
+  val groupMembers = chatModel.controller.apiListMembers(groupInfo.groupId)
+  chatModel.groupMembers.clear()
+  chatModel.groupMembers.addAll(groupMembers)
+}
+
 @Composable
 fun ContactMenuItems(chat: Chat, chatModel: ChatModel, showMenu: MutableState<Boolean>, showMarkRead: Boolean) {
   if (showMarkRead) {
-    ItemAction(
-      stringResource(R.string.mark_read),
-      Icons.Outlined.Check,
-      onClick = {
-        markChatRead(chat, chatModel)
-        chatModel.controller.ntfManager.cancelNotificationsForChat(chat.id)
-        showMenu.value = false
-      }
-    )
+    MarkReadChatAction(chat, chatModel, showMenu)
+  } else {
+    MarkUnreadChatAction(chat, chatModel, showMenu)
   }
+  ToggleNotificationsChatAction(chat, chatModel, chat.chatInfo.ntfsEnabled, showMenu)
+  ClearChatAction(chat, chatModel, showMenu)
+  DeleteContactAction(chat, chatModel, showMenu)
+}
+
+@Composable
+fun GroupMenuItems(chat: Chat, groupInfo: GroupInfo, chatModel: ChatModel, showMenu: MutableState<Boolean>, showMarkRead: Boolean) {
+  when (groupInfo.membership.memberStatus) {
+    GroupMemberStatus.MemInvited -> {
+      JoinGroupAction(chat, groupInfo, chatModel, showMenu)
+      if (groupInfo.canDelete) {
+        DeleteGroupAction(chat, groupInfo, chatModel, showMenu)
+      }
+    }
+    else -> {
+      if (showMarkRead) {
+        MarkReadChatAction(chat, chatModel, showMenu)
+      } else {
+        MarkUnreadChatAction(chat, chatModel, showMenu)
+      }
+      ToggleNotificationsChatAction(chat, chatModel, chat.chatInfo.ntfsEnabled, showMenu)
+      ClearChatAction(chat, chatModel, showMenu)
+      if (groupInfo.membership.memberCurrent) {
+        LeaveGroupAction(groupInfo, chatModel, showMenu)
+      }
+      if (groupInfo.canDelete) {
+        DeleteGroupAction(chat, groupInfo, chatModel, showMenu)
+      }
+    }
+  }
+}
+
+@Composable
+fun MarkReadChatAction(chat: Chat, chatModel: ChatModel, showMenu: MutableState<Boolean>) {
   ItemAction(
-    stringResource(R.string.clear_verb),
+    stringResource(R.string.mark_read),
+    Icons.Outlined.Check,
+    onClick = {
+      markChatRead(chat, chatModel)
+      chatModel.controller.ntfManager.cancelNotificationsForChat(chat.id)
+      showMenu.value = false
+    }
+  )
+}
+
+@Composable
+fun MarkUnreadChatAction(chat: Chat, chatModel: ChatModel, showMenu: MutableState<Boolean>) {
+  DropdownMenuItem({
+    markChatUnread(chat, chatModel)
+    showMenu.value = false
+  }) {
+    Row {
+      Text(
+        stringResource(R.string.mark_unread),
+        modifier = Modifier
+          .fillMaxWidth()
+          .weight(1F)
+          .padding(end = 15.dp),
+        color = MaterialTheme.colors.onBackground
+      )
+      Icon(
+        Icons.Outlined.MarkChatUnread,
+        stringResource(R.string.mark_unread),
+        tint = MaterialTheme.colors.onBackground
+      )
+    }
+  }
+}
+
+@Composable
+fun ToggleNotificationsChatAction(chat: Chat, chatModel: ChatModel, ntfsEnabled: Boolean, showMenu: MutableState<Boolean>) {
+  ItemAction(
+    if (ntfsEnabled) stringResource(R.string.mute_chat) else stringResource(R.string.unmute_chat),
+    if (ntfsEnabled) Icons.Outlined.NotificationsOff else Icons.Outlined.Notifications,
+    onClick = {
+      changeNtfsStatePerChat(!ntfsEnabled, mutableStateOf(ntfsEnabled), chat, chatModel)
+      showMenu.value = false
+    }
+  )
+}
+
+@Composable
+fun ClearChatAction(chat: Chat, chatModel: ChatModel, showMenu: MutableState<Boolean>) {
+  ItemAction(
+    stringResource(R.string.clear_chat_menu_action),
     Icons.Outlined.Restore,
     onClick = {
       clearChatDialog(chat.chatInfo, chatModel)
@@ -110,11 +219,15 @@ fun ContactMenuItems(chat: Chat, chatModel: ChatModel, showMenu: MutableState<Bo
     },
     color = WarningOrange
   )
+}
+
+@Composable
+fun DeleteContactAction(chat: Chat, chatModel: ChatModel, showMenu: MutableState<Boolean>) {
   ItemAction(
-    stringResource(R.string.delete_verb),
+    stringResource(R.string.delete_contact_menu_action),
     Icons.Outlined.Delete,
     onClick = {
-      deleteContactDialog(chat.chatInfo as ChatInfo.Direct, chatModel)
+      deleteContactDialog(chat.chatInfo, chatModel)
       showMenu.value = false
     },
     color = Color.Red
@@ -122,34 +235,51 @@ fun ContactMenuItems(chat: Chat, chatModel: ChatModel, showMenu: MutableState<Bo
 }
 
 @Composable
-fun GroupMenuItems(chat: Chat, chatModel: ChatModel, showMenu: MutableState<Boolean>, showMarkRead: Boolean) {
-  if (showMarkRead) {
-    ItemAction(
-      stringResource(R.string.mark_read),
-      Icons.Outlined.Check,
-      onClick = {
-        markChatRead(chat, chatModel)
-        chatModel.controller.ntfManager.cancelNotificationsForChat(chat.id)
-        showMenu.value = false
-      }
-    )
-  }
+fun DeleteGroupAction(chat: Chat, groupInfo: GroupInfo, chatModel: ChatModel, showMenu: MutableState<Boolean>) {
   ItemAction(
-    stringResource(R.string.clear_verb),
-    Icons.Outlined.Restore,
+    stringResource(R.string.delete_group_menu_action),
+    Icons.Outlined.Delete,
     onClick = {
-      clearChatDialog(chat.chatInfo, chatModel)
+      deleteGroupDialog(chat.chatInfo, groupInfo, chatModel)
       showMenu.value = false
     },
-    color = WarningOrange
+    color = Color.Red
+  )
+}
+
+@Composable
+fun JoinGroupAction(chat: Chat, groupInfo: GroupInfo, chatModel: ChatModel, showMenu: MutableState<Boolean>) {
+  val joinGroup: () -> Unit = { withApi { chatModel.controller.apiJoinGroup(groupInfo.groupId) } }
+  ItemAction(
+    if (chat.chatInfo.incognito) stringResource(R.string.join_group_incognito_button) else stringResource(R.string.join_group_button),
+    if (chat.chatInfo.incognito) Icons.Filled.TheaterComedy else Icons.Outlined.Login,
+    color = if (chat.chatInfo.incognito) Indigo else MaterialTheme.colors.onBackground,
+    onClick = {
+      joinGroup()
+      showMenu.value = false
+    }
+  )
+}
+
+@Composable
+fun LeaveGroupAction(groupInfo: GroupInfo, chatModel: ChatModel, showMenu: MutableState<Boolean>) {
+  ItemAction(
+    stringResource(R.string.leave_group_button),
+    Icons.Outlined.Logout,
+    onClick = {
+      leaveGroupDialog(groupInfo, chatModel)
+      showMenu.value = false
+    },
+    color = Color.Red
   )
 }
 
 @Composable
 fun ContactRequestMenuItems(chatInfo: ChatInfo.ContactRequest, chatModel: ChatModel, showMenu: MutableState<Boolean>) {
   ItemAction(
-    stringResource(R.string.accept_contact_button),
-    Icons.Outlined.Check,
+    if (chatModel.incognito.value) stringResource(R.string.accept_contact_incognito_button) else stringResource(R.string.accept_contact_button),
+    if (chatModel.incognito.value) Icons.Filled.TheaterComedy else Icons.Outlined.Check,
+    color = if (chatModel.incognito.value) Indigo else MaterialTheme.colors.onBackground,
     onClick = {
       acceptContactRequest(chatInfo, chatModel)
       showMenu.value = false
@@ -169,24 +299,65 @@ fun ContactRequestMenuItems(chatInfo: ChatInfo.ContactRequest, chatModel: ChatMo
 @Composable
 fun ContactConnectionMenuItems(chatInfo: ChatInfo.ContactConnection, chatModel: ChatModel, showMenu: MutableState<Boolean>) {
   ItemAction(
+    stringResource(R.string.set_contact_name),
+    Icons.Outlined.Edit,
+    onClick = {
+      ModalManager.shared.showModalCloseable(true) { close ->
+        ContactConnectionInfoView(chatModel, chatInfo.contactConnection.connReqInv, chatInfo.contactConnection, true, close)
+      }
+      showMenu.value = false
+    },
+  )
+  ItemAction(
     stringResource(R.string.delete_verb),
     Icons.Outlined.Delete,
     onClick = {
-      deleteContactConnectionAlert(chatInfo.contactConnection, chatModel)
+      deleteContactConnectionAlert(chatInfo.contactConnection, chatModel) {}
       showMenu.value = false
     },
     color = Color.Red
   )
 }
 
-fun markChatRead(chat: Chat, chatModel: ChatModel) {
-  chatModel.markChatItemsRead(chat.chatInfo)
+fun markChatRead(c: Chat, chatModel: ChatModel) {
+  var chat = c
   withApi {
-    chatModel.controller.apiChatRead(
+    if (chat.chatStats.unreadCount > 0) {
+      val minUnreadItemId = chat.chatStats.minUnreadItemId
+      chatModel.markChatItemsRead(chat.chatInfo)
+      chatModel.controller.apiChatRead(
+        chat.chatInfo.chatType,
+        chat.chatInfo.apiId,
+        CC.ItemRange(minUnreadItemId, chat.chatItems.last().id)
+      )
+      chat = chatModel.getChat(chat.id) ?: return@withApi
+    }
+    if (chat.chatStats.unreadChat) {
+      val success = chatModel.controller.apiChatUnread(
+        chat.chatInfo.chatType,
+        chat.chatInfo.apiId,
+        false
+      )
+      if (success) {
+        chatModel.replaceChat(chat.id, chat.copy(chatStats = chat.chatStats.copy(unreadChat = false)))
+      }
+    }
+  }
+}
+
+fun markChatUnread(chat: Chat, chatModel: ChatModel) {
+  // Just to be sure
+  if (chat.chatStats.unreadChat) return
+
+  withApi {
+    val success = chatModel.controller.apiChatUnread(
       chat.chatInfo.chatType,
       chat.chatInfo.apiId,
-      CC.ItemRange(chat.chatStats.minUnreadItemId, chat.chatItems.last().id)
+      true
     )
+    if (success) {
+      chatModel.replaceChat(chat.id, chat.copy(chatStats = chat.chatStats.copy(unreadChat = true)))
+    }
   }
 }
 
@@ -194,7 +365,7 @@ fun contactRequestAlertDialog(contactRequest: ChatInfo.ContactRequest, chatModel
   AlertManager.shared.showAlertDialog(
     title = generalGetString(R.string.accept_connection_request__question),
     text = generalGetString(R.string.if_you_choose_to_reject_the_sender_will_not_be_notified),
-    confirmText = generalGetString(R.string.accept_contact_button),
+    confirmText = if (chatModel.incognito.value) generalGetString(R.string.accept_contact_incognito_button) else generalGetString(R.string.accept_contact_button),
     onConfirm = { acceptContactRequest(contactRequest, chatModel) },
     dismissText = generalGetString(R.string.reject_contact_button),
     onDismiss = { rejectContactRequest(contactRequest, chatModel) }
@@ -235,14 +406,14 @@ fun contactConnectionAlertDialog(connection: PendingContactConnection, chatModel
           .padding(horizontal = 8.dp, vertical = 2.dp),
         horizontalArrangement = Arrangement.End,
       ) {
-        Button(onClick = {
+        TextButton(onClick = {
           AlertManager.shared.hideAlert()
-          deleteContactConnectionAlert(connection, chatModel)
+          deleteContactConnectionAlert(connection, chatModel) {}
         }) {
           Text(stringResource(R.string.delete_verb))
         }
         Spacer(Modifier.padding(horizontal = 4.dp))
-        Button(onClick = { AlertManager.shared.hideAlert() }) {
+        TextButton(onClick = { AlertManager.shared.hideAlert() }) {
           Text(stringResource(R.string.ok))
         }
       }
@@ -250,7 +421,7 @@ fun contactConnectionAlertDialog(connection: PendingContactConnection, chatModel
   )
 }
 
-fun deleteContactConnectionAlert(connection: PendingContactConnection, chatModel: ChatModel) {
+fun deleteContactConnectionAlert(connection: PendingContactConnection, chatModel: ChatModel, onSuccess: () -> Unit) {
   AlertManager.shared.showAlertDialog(
     title = generalGetString(R.string.delete_pending_connection__question),
     text = generalGetString(
@@ -263,6 +434,7 @@ fun deleteContactConnectionAlert(connection: PendingContactConnection, chatModel
         AlertManager.shared.hideAlert()
         if (chatModel.controller.apiDeleteChat(ChatType.ContactConnection, connection.apiId)) {
           chatModel.removeChat(connection.id)
+          onSuccess()
         }
       }
     }
@@ -287,6 +459,73 @@ fun pendingContactAlertDialog(chatInfo: ChatInfo, chatModel: ChatModel) {
   )
 }
 
+fun acceptGroupInvitationAlertDialog(groupInfo: GroupInfo, chatModel: ChatModel) {
+  AlertManager.shared.showAlertDialog(
+    title = generalGetString(R.string.join_group_question),
+    text = generalGetString(R.string.you_are_invited_to_group_join_to_connect_with_group_members),
+    confirmText = if (groupInfo.membership.memberIncognito) generalGetString(R.string.join_group_incognito_button) else generalGetString(R.string.join_group_button),
+    onConfirm = { withApi { chatModel.controller.apiJoinGroup(groupInfo.groupId) } },
+    dismissText = generalGetString(R.string.delete_verb),
+    onDismiss = { deleteGroup(groupInfo, chatModel) }
+  )
+}
+
+fun cantInviteIncognitoAlert() {
+  AlertManager.shared.showAlertMsg(
+    title = generalGetString(R.string.alert_title_cant_invite_contacts),
+    text = generalGetString(R.string.alert_title_cant_invite_contacts_descr),
+    confirmText = generalGetString(R.string.ok),
+  )
+}
+
+fun deleteGroup(groupInfo: GroupInfo, chatModel: ChatModel) {
+  withApi {
+    val r = chatModel.controller.apiDeleteChat(ChatType.Group, groupInfo.apiId)
+    if (r) {
+      chatModel.removeChat(groupInfo.id)
+      chatModel.chatId.value = null
+      chatModel.controller.ntfManager.cancelNotificationsForChat(groupInfo.id)
+    }
+  }
+}
+
+fun groupInvitationAcceptedAlert() {
+  AlertManager.shared.showAlertMsg(
+    generalGetString(R.string.joining_group),
+    generalGetString(R.string.youve_accepted_group_invitation_connecting_to_inviting_group_member)
+  )
+}
+
+fun changeNtfsStatePerChat(enabled: Boolean, currentState: MutableState<Boolean>, chat: Chat, chatModel: ChatModel) {
+  val newChatInfo = when(chat.chatInfo) {
+    is ChatInfo.Direct -> with (chat.chatInfo) {
+      ChatInfo.Direct(contact.copy(chatSettings = contact.chatSettings.copy(enableNtfs = enabled)))
+    }
+    is ChatInfo.Group -> with(chat.chatInfo) {
+      ChatInfo.Group(groupInfo.copy(chatSettings = groupInfo.chatSettings.copy(enableNtfs = enabled)))
+    }
+    else -> null
+  }
+  withApi {
+    val res = when (newChatInfo) {
+      is ChatInfo.Direct -> with(newChatInfo) {
+        chatModel.controller.apiSetSettings(chatType, apiId, contact.chatSettings)
+      }
+      is ChatInfo.Group -> with(newChatInfo) {
+        chatModel.controller.apiSetSettings(chatType, apiId, groupInfo.chatSettings)
+      }
+      else -> false
+    }
+    if (res && newChatInfo != null) {
+      chatModel.updateChatInfo(newChatInfo)
+      if (!enabled) {
+        chatModel.controller.ntfManager.cancelNotificationsForChat(chat.id)
+      }
+      currentState.value = enabled
+    }
+  }
+}
+
 @Composable
 fun ChatListNavLinkLayout(
   chatLinkPreview: @Composable () -> Unit,
@@ -295,7 +534,7 @@ fun ChatListNavLinkLayout(
   showMenu: MutableState<Boolean>,
   stopped: Boolean
 ) {
-  var modifier = Modifier.fillMaxWidth().height(88.dp)
+  var modifier = Modifier.fillMaxWidth()
   if (!stopped) modifier = modifier.combinedClickable(onClick = click, onLongClick = { showMenu.value = true })
   Surface(modifier) {
     Row(
@@ -347,6 +586,8 @@ fun PreviewChatListNavLinkDirect() {
             ),
             chatStats = Chat.ChatStats()
           ),
+          false,
+          null,
           stopped = false
         )
       },
@@ -382,6 +623,8 @@ fun PreviewChatListNavLinkGroup() {
             ),
             chatStats = Chat.ChatStats()
           ),
+          false,
+          null,
           stopped = false
         )
       },
@@ -404,7 +647,7 @@ fun PreviewChatListNavLinkContactRequest() {
   SimpleXTheme {
     ChatListNavLinkLayout(
       chatLinkPreview = {
-        ContactRequestView(ChatInfo.ContactRequest.sampleData)
+        ContactRequestView(false, ChatInfo.ContactRequest.sampleData)
       },
       click = {},
       dropdownMenuItems = null,

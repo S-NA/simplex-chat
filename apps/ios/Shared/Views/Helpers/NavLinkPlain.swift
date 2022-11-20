@@ -8,22 +8,17 @@
 
 import SwiftUI
 
-struct NavLinkPlain<V: Hashable, Destination: View, Label: View>: View {
+struct NavLinkPlain<V: Hashable, Label: View>: View {
     @State var tag: V
     @Binding var selection: V?
-    @ViewBuilder var destination: () -> Destination
     @ViewBuilder var label: () -> Label
     var disabled = false
 
     var body: some View {
         ZStack {
-            Button("") { selection = tag }
+            Button("") { DispatchQueue.main.async { selection = tag } }
                 .disabled(disabled)
             label()
-        }
-        .background {
-            NavigationLink("", tag: tag, selection: $selection, destination: destination)
-                .hidden()
         }
     }
 }

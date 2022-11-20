@@ -1,10 +1,18 @@
+---
+layout: layouts/article.html
+title: "Instant notifications for SimpleX Chat mobile apps"
+date: 2022-04-04
+preview: Design of private instant notifications on Android and for push notifications for iOS.
+permalink: "/blog/20220404-simplex-chat-instant-notifications.html"
+---
+
 # Instant notifications for SimpleX Chat mobile apps
 
 **Published:** April 04, 2022
 
 ## SimpleX Chat is the first chat platform that is 100% private by design - it has no access to your connections
 
-Since we released SimpleX Chat mobile apps couple of weeks ago we've had a lot of excitement from our users - nearly 2000 people downloaded the app after [the announcement](https://github.com/simplex-chat/simplex-chat/blob/stable/blog/20220308-simplex-chat-mobile-apps.md)!
+Since we released SimpleX Chat mobile apps couple of weeks ago we've had a lot of excitement from our users - nearly 2000 people downloaded the app after [the announcement](./20220308-simplex-chat-mobile-apps.md)!
 
 Huge thanks to everybody who downloaded and connected to us via the chat - there were many great questions and suggestions, and on some days I spent most of the time chatting to our users :)
 
@@ -56,7 +64,7 @@ How does it work? When the app is first started on an Android device, it starts 
 
 This service continues running when the app is switched off, and it is restarted when the device is restarted even if you don't open the app - so the message notifications arrive instantly every time. To maximize battery life, it can be turned off by switching off "Private notifications". You will still receive notifications while the app is running or in the background.
 
-So, for Android we can now deliver instant message notifications without compromising users' privacy in any way. The app version 1.5 that includes private instant notifications is now available on [Play Store](https://play.google.com/store/apps/details?id=chat.simplex.app), in our [F-Droid repo](https://app.simplex.chat/) and via direct [APK](https://github.com/simplex-chat/website/raw/master/simplex.apk) downloads!
+So, for Android we can now deliver instant message notifications without compromising users' privacy in any way. The app version 1.5 that includes private instant notifications is now available on [Play Store](https://play.google.com/store/apps/details?id=chat.simplex.app), in our [F-Droid repo](https://app.simplex.chat/) and via direct [APK](https://github.com/simplex-chat/simplex-chat/releases/latest/download/simplex.apk) downloads!
 
 Please let us what needs to be improved - it's only the first version of instant notifications for Android!
 
@@ -68,7 +76,7 @@ We already have background refresh in the iOS app that periodically checks for n
 
 The only solution known to us is using Apple's push notifications service (APN) to deliver push notifications.
 
-We planned for it, so we added to [v1 of SMP](https://github.com/simplex-chat/simplex-chat/blob/stable/blog/20220112-simplex-chat-v1-released.md) (the protocol used by our servers) an extension allowing the client to subscribe to notifications from message queues, via separate queue addresses, and using separate cryptographic keys for each queue. This has to be enabled by the client for each queue separately. We haven't used this extension so far, and now we are building a SimpleX notification service based on it.
+We planned for it, so we added to [v1 of SMP](./20220112-simplex-chat-v1-released.md) (the protocol used by our servers) an extension allowing the client to subscribe to notifications from message queues, via separate queue addresses, and using separate cryptographic keys for each queue. This has to be enabled by the client for each queue separately. We haven't used this extension so far, and now we are building a SimpleX notification service based on it.
 
 If the user enables push notifications, then for each contact the app would enable a notification subscription and pass credentials to the notification server together with the device token required to deliver push notifications to user's device.
 

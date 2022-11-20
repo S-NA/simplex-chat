@@ -14,6 +14,7 @@ struct ChatItemView: View {
     var chatItem: ChatItem
     var showMember = false
     var maxWidth: CGFloat = .infinity
+    @State var scrollProxy: ScrollViewProxy? = nil
 
     var body: some View {
         switch chatItem.content {
@@ -24,6 +25,12 @@ struct ChatItemView: View {
         case let .sndCall(status, duration): callItemView(status, duration)
         case let .rcvCall(status, duration): callItemView(status, duration)
         case .rcvIntegrityError: IntegrityErrorItemView(chatItem: chatItem, showMember: showMember)
+        case let .rcvGroupInvitation(groupInvitation, memberRole): groupInvitationItemView(groupInvitation, memberRole)
+        case let .sndGroupInvitation(groupInvitation, memberRole): groupInvitationItemView(groupInvitation, memberRole)
+        case .rcvGroupEvent: eventItemView()
+        case .sndGroupEvent: eventItemView()
+        case .rcvConnEvent: eventItemView()
+        case .sndConnEvent: eventItemView()
         }
     }
 
@@ -31,7 +38,7 @@ struct ChatItemView: View {
         if (chatItem.quotedItem == nil && chatItem.file == nil && isShortEmoji(chatItem.content.text)) {
             EmojiItemView(chatItem: chatItem)
         } else {
-            FramedItemView(chatItem: chatItem, showMember: showMember, maxWidth: maxWidth)
+            FramedItemView(chatInfo: chatInfo, chatItem: chatItem, showMember: showMember, maxWidth: maxWidth, scrollProxy: scrollProxy)
         }
     }
 
@@ -41,6 +48,14 @@ struct ChatItemView: View {
 
     private func callItemView(_ status: CICallStatus, _ duration: Int) -> some View {
         CICallItemView(chatInfo: chatInfo, chatItem: chatItem, status: status, duration: duration)
+    }
+
+    private func groupInvitationItemView(_ groupInvitation: CIGroupInvitation, _ memberRole: GroupMemberRole) -> some View {
+        CIGroupInvitationView(chatItem: chatItem, groupInvitation: groupInvitation, memberRole: memberRole, chatIncognito: chatInfo.incognito)
+    }
+
+    private func eventItemView() -> some View {
+        CIEventView(chatItem: chatItem)
     }
 }
 

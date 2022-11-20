@@ -2,24 +2,21 @@ package chat.simplex.app.views.helpers
 
 import android.util.Log
 import androidx.compose.material.*
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.*
+import androidx.compose.ui.graphics.Color
 import chat.simplex.app.R
 import chat.simplex.app.TAG
 
 class AlertManager {
-  var alertView = mutableStateOf<(@Composable () -> Unit)?>(null)
-  var presentAlert = mutableStateOf<Boolean>(false)
+  var alertViews = mutableStateListOf<(@Composable () -> Unit)>()
 
   fun showAlert(alert: @Composable () -> Unit) {
     Log.d(TAG, "AlertManager.showAlert")
-    alertView.value = alert
-    presentAlert.value = true
+    alertViews.add(alert)
   }
 
   fun hideAlert() {
-    presentAlert.value = false
-    alertView.value = null
+    alertViews.removeLastOrNull()
   }
 
   fun showAlertDialogButtons(
@@ -44,22 +41,24 @@ class AlertManager {
     confirmText: String = generalGetString(R.string.ok),
     onConfirm: (() -> Unit)? = null,
     dismissText: String = generalGetString(R.string.cancel_verb),
-    onDismiss: (() -> Unit)? = null
+    onDismiss: (() -> Unit)? = null,
+    onDismissRequest: (() -> Unit)? = null,
+    destructive: Boolean = false
   ) {
     val alertText: (@Composable () -> Unit)? = if (text == null) null else { -> Text(text) }
     showAlert {
       AlertDialog(
-        onDismissRequest = this::hideAlert,
+        onDismissRequest = { onDismissRequest?.invoke(); hideAlert() },
         title = { Text(title) },
         text = alertText,
         confirmButton = {
-          Button(onClick = {
+          TextButton(onClick = {
             onConfirm?.invoke()
             hideAlert()
-          }) { Text(confirmText) }
+          }) { Text(confirmText, color = if (destructive) MaterialTheme.colors.error else Color.Unspecified) }
         },
         dismissButton = {
-          Button(onClick = {
+          TextButton(onClick = {
             onDismiss?.invoke()
             hideAlert()
           }) { Text(dismissText) }
@@ -79,7 +78,7 @@ class AlertManager {
         title = { Text(title) },
         text = alertText,
         confirmButton = {
-          Button(onClick = {
+          TextButton(onClick = {
             onConfirm?.invoke()
             hideAlert()
           }) { Text(confirmText) }
@@ -88,9 +87,16 @@ class AlertManager {
     }
   }
 
+  fun showAlertMsg(
+    title: Int,
+    text: Int? = null,
+    confirmText: Int = R.string.ok,
+    onConfirm: (() -> Unit)? = null
+  ) = showAlertMsg(generalGetString(title), if (text != null) generalGetString(text) else null, generalGetString(confirmText), onConfirm)
+
   @Composable
   fun showInView() {
-    if (presentAlert.value) alertView.value?.invoke()
+    remember { alertViews }.lastOrNull()?.invoke()
   }
 
   companion object {

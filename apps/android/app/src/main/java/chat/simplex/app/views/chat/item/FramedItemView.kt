@@ -1,6 +1,5 @@
 package chat.simplex.app.views.chat.item
 
-import CIImageView
 import androidx.compose.foundation.*
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -10,16 +9,17 @@ import androidx.compose.material.icons.filled.InsertDriveFile
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.*
 import androidx.compose.ui.platform.UriHandler
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.tooling.preview.*
-import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
+import androidx.compose.ui.unit.*
+import androidx.compose.ui.util.fastMap
 import chat.simplex.app.R
 import chat.simplex.app.model.*
 import chat.simplex.app.ui.theme.*
@@ -34,14 +34,21 @@ val ReceivedQuoteColorLight = Color(0x25B1B0B5)
 
 @Composable
 fun FramedItemView(
-  user: User,
+  chatInfo: ChatInfo,
   ci: ChatItem,
   uriHandler: UriHandler? = null,
+  imageProvider: (() -> ImageGalleryProvider)? = null,
   showMember: Boolean = false,
   showMenu: MutableState<Boolean>,
-  receiveFile: (Long) -> Unit
+  receiveFile: (Long) -> Unit,
+  onLinkLongClick: (link: String) -> Unit = {},
+  scrollToItem: (Long) -> Unit = {},
 ) {
   val sent = ci.chatDir.sent
+
+  fun membership(): GroupMember? {
+    return if (chatInfo is ChatInfo.Group) chatInfo.groupInfo.membership else null
+  }
 
   @Composable
   fun ciQuotedMsgView(qi: CIQuote) {
@@ -50,7 +57,7 @@ fun FramedItemView(
       contentAlignment = Alignment.TopStart
     ) {
       MarkdownText(
-        qi.text, qi.formattedText, sender = qi.sender(user), senderBold = true, maxLines = 3,
+        qi.text, qi.formattedText, sender = qi.sender(membership()), senderBold = true, maxLines = 3,
         style = TextStyle(fontSize = 15.sp, color = MaterialTheme.colors.onSurface)
       )
     }
@@ -62,6 +69,10 @@ fun FramedItemView(
       Modifier
         .background(if (sent) SentQuoteColorLight else ReceivedQuoteColorLight)
         .fillMaxWidth()
+        .combinedClickable(
+          onLongClick = { showMenu.value = true },
+          onClick = { scrollToItem(qi.itemId?: return@combinedClickable) }
+        )
     ) {
       when (qi.content) {
         is MsgContent.MCImage -> {
@@ -86,7 +97,7 @@ fun FramedItemView(
             Modifier
               .padding(top = 6.dp, end = 4.dp)
               .size(22.dp),
-            tint = if (isSystemInDarkTheme()) FileDark else FileLight
+            tint = if (isInDarkTheme()) FileDark else FileLight
           )
         }
         else -> ciQuotedMsgView(qi)
@@ -94,34 +105,37 @@ fun FramedItemView(
     }
   }
 
-  Surface(
-    shape = RoundedCornerShape(18.dp),
-    color = if (sent) SentColorLight else ReceivedColorLight
-  ) {
+  val transparentBackground = ci.content.msgContent is MsgContent.MCImage && ci.content.text.isEmpty() && ci.quotedItem == null
+  Box(Modifier
+    .clip(RoundedCornerShape(18.dp))
+    .background(
+      when {
+        transparentBackground -> Color.Transparent
+        sent -> SentColorLight
+        else -> ReceivedColorLight
+      }
+    )) {
     var metaColor = HighOrLowlight
     Box(contentAlignment = Alignment.BottomEnd) {
       Column(Modifier.width(IntrinsicSize.Max)) {
-        val qi = ci.quotedItem
-        if (qi != null) {
-          ciQuoteView(qi)
-        }
-        if (ci.file == null && ci.formattedText == null && isShortEmoji(ci.content.text)) {
-          Box(Modifier.padding(vertical = 6.dp, horizontal = 12.dp)) {
-            Column(
-              Modifier
-                .padding(bottom = 2.dp)
-                .fillMaxWidth(),
-              horizontalAlignment = Alignment.CenterHorizontally
-            ) {
-              EmojiText(ci.content.text)
-              Text("")
+        PriorityLayout(Modifier, CHAT_IMAGE_LAYOUT_ID) {
+          ci.quotedItem?.let { ciQuoteView(it) }
+          if (ci.file == null && ci.formattedText == null && isShortEmoji(ci.content.text)) {
+            Box(Modifier.padding(vertical = 6.dp, horizontal = 12.dp)) {
+              Column(
+                Modifier
+                  .padding(bottom = 2.dp)
+                  .fillMaxWidth(),
+                horizontalAlignment = Alignment.CenterHorizontally
+              ) {
+                EmojiText(ci.content.text)
+                Text("")
+              }
             }
-          }
-        } else {
-          Column(Modifier.fillMaxWidth()) {
+          } else {
             when (val mc = ci.content.msgContent) {
               is MsgContent.MCImage -> {
-                CIImageView(image = mc.image, file = ci.file, showMenu, receiveFile)
+                CIImageView(image = mc.image, file = ci.file, imageProvider ?: return@PriorityLayout, showMenu, receiveFile)
                 if (mc.text == "") {
                   metaColor = Color.White
                 } else {
@@ -136,9 +150,9 @@ fun FramedItemView(
               }
               is MsgContent.MCLink -> {
                 ChatItemLinkView(mc.preview)
-                CIMarkdownText(ci, showMember, uriHandler)
+                CIMarkdownText(ci, showMember, uriHandler, onLinkLongClick)
               }
-              else -> CIMarkdownText(ci, showMember, uriHandler)
+              else -> CIMarkdownText(ci, showMember, uriHandler, onLinkLongClick)
             }
           }
         }
@@ -151,12 +165,49 @@ fun FramedItemView(
 }
 
 @Composable
-fun CIMarkdownText(ci: ChatItem, showMember: Boolean, uriHandler: UriHandler?) {
+fun CIMarkdownText(
+  ci: ChatItem,
+  showMember: Boolean,
+  uriHandler: UriHandler?,
+  onLinkLongClick: (link: String) -> Unit = {}
+) {
   Box(Modifier.padding(vertical = 6.dp, horizontal = 12.dp)) {
     MarkdownText(
       ci.content.text, ci.formattedText, if (showMember) ci.memberDisplayName else null,
-      metaText = ci.timestampText, edited = ci.meta.itemEdited, uriHandler = uriHandler, senderBold = true
+      metaText = ci.timestampText, edited = ci.meta.itemEdited,
+      uriHandler = uriHandler, senderBold = true, onLinkLongClick = onLinkLongClick
     )
+  }
+}
+
+const val CHAT_IMAGE_LAYOUT_ID = "chatImage"
+
+@Composable
+fun PriorityLayout(
+  modifier: Modifier = Modifier,
+  priorityLayoutId: String,
+  content: @Composable () -> Unit
+) {
+  Layout(
+    content = content,
+    modifier = modifier
+  ) { measureable, constraints ->
+    // Find important element which should tell what max width other elements can use
+    // Expecting only one such element. Can be less than one but not more
+    val imagePlaceable = measureable.firstOrNull { it.layoutId == priorityLayoutId }?.measure(constraints)
+    val placeables: List<Placeable> = measureable.fastMap {
+      if (it.layoutId == priorityLayoutId)
+        imagePlaceable!!
+      else
+        it.measure(constraints.copy(maxWidth = imagePlaceable?.width ?: constraints.maxWidth)) }
+    // Limit width for every other element to width of important element and height for a sum of all elements
+    layout(imagePlaceable?.measuredWidth ?: placeables.maxOf { it.width }, placeables.sumOf { it.height }) {
+      var y = 0
+      placeables.forEach {
+        it.place(0, y)
+        y += it.measuredHeight
+      }
+    }
   }
 }
 
@@ -170,7 +221,7 @@ fun PreviewTextItemViewSnd(@PreviewParameter(EditedProvider::class) edited: Bool
   val showMenu = remember { mutableStateOf(false) }
   SimpleXTheme {
     FramedItemView(
-      User.sampleData,
+      ChatInfo.Direct.sampleData,
       ChatItem.getSampleData(
         1, CIDirection.DirectSnd(), Clock.System.now(), "hello", itemEdited = edited,
       ),
@@ -186,7 +237,7 @@ fun PreviewTextItemViewRcv(@PreviewParameter(EditedProvider::class) edited: Bool
   val showMenu = remember { mutableStateOf(false) }
   SimpleXTheme {
     FramedItemView(
-      User.sampleData,
+      ChatInfo.Direct.sampleData,
       ChatItem.getSampleData(
         1, CIDirection.DirectRcv(), Clock.System.now(), "hello", itemEdited = edited
       ),
@@ -202,7 +253,7 @@ fun PreviewTextItemViewLong(@PreviewParameter(EditedProvider::class) edited: Boo
   val showMenu = remember { mutableStateOf(false) }
   SimpleXTheme {
     FramedItemView(
-      User.sampleData,
+      ChatInfo.Direct.sampleData,
       ChatItem.getSampleData(
         1,
         CIDirection.DirectSnd(),
@@ -222,7 +273,7 @@ fun PreviewTextItemViewQuote(@PreviewParameter(EditedProvider::class) edited: Bo
   val showMenu = remember { mutableStateOf(false) }
   SimpleXTheme {
     FramedItemView(
-      User.sampleData,
+      ChatInfo.Direct.sampleData,
       ChatItem.getSampleData(
         1, CIDirection.DirectSnd(),
         Clock.System.now(),
@@ -243,7 +294,7 @@ fun PreviewTextItemViewEmoji(@PreviewParameter(EditedProvider::class) edited: Bo
   val showMenu = remember { mutableStateOf(false) }
   SimpleXTheme {
     FramedItemView(
-      User.sampleData,
+      ChatInfo.Direct.sampleData,
       ChatItem.getSampleData(
         1, CIDirection.DirectSnd(),
         Clock.System.now(),
@@ -271,7 +322,7 @@ fun PreviewQuoteWithTextAndImage(@PreviewParameter(EditedProvider::class) edited
   val showMenu = remember { mutableStateOf(false) }
   SimpleXTheme {
     FramedItemView(
-      User.sampleData,
+      ChatInfo.Direct.sampleData,
       ChatItem.getSampleData(
         1, CIDirection.DirectSnd(),
         Clock.System.now(),
@@ -299,7 +350,7 @@ fun PreviewQuoteWithLongTextAndImage(@PreviewParameter(EditedProvider::class) ed
   val showMenu = remember { mutableStateOf(false) }
   SimpleXTheme {
     FramedItemView(
-      User.sampleData,
+      ChatInfo.Direct.sampleData,
       ChatItem.getSampleData(
         1, CIDirection.DirectSnd(),
         Clock.System.now(),
@@ -326,7 +377,7 @@ fun PreviewQuoteWithLongTextAndFile(@PreviewParameter(EditedProvider::class) edi
   val showMenu = remember { mutableStateOf(false) }
   SimpleXTheme {
     FramedItemView(
-      User.sampleData,
+      ChatInfo.Direct.sampleData,
       ChatItem.getSampleData(
         1, CIDirection.DirectSnd(),
         Clock.System.now(),

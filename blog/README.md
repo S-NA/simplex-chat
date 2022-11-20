@@ -1,10 +1,60 @@
 # Blog
 
-Jul 11, 2022 [SimpleX Chat v3 released](./20220711-simplex-chat-v3-released-ios-notifications-audio-video-calls-database-export-import-protocol-improvements.md):
+Nov 8, 2022 [Security audit by Trail of Bits, the new website and v4.2 released](./20221108-simplex-chat-v4.2-security-audit-new-website.md)
 
-- instant push notifications for iOS
-- e2e encrypted WebRTC audio/video calls
+_"Have you been audited or should we just ignore you?"_
+
+SimpleX Chat has now been audited by [Trail of Bits](https://www.trailofbits.com/about), 4 issues were identified, and 3 of them are fixed in 4.2
+
+The new website is live: https://simplex.chat
+
+v4.2 is released:
+
+- group links - group admins can create the links for new members to join
+- auto-accept contact requests + configure whether to accept incognito and welcome message
+- small things: change group member role, mark chat as unread, send stickers and GIFs from Android keyboards.
+- manually switch contact or member to another address / server (BETA)
+- receive files faster (BETA)
+
+Sep 28, 2022 [v4: local database encryption](./20220928-simplex-chat-v4-encrypted-database.md)
+
+- encrypted local chat database - if you already use the app, you can encrypt the database in the app settings
+- support for self-hosted WebRTC ICE servers
+- improved stability of creating new connections: more reliable groups, files and contacts
+- deleting files and media - for security and to save storage
+- For developers - TypeScript SDK for integrating with SimpleX Chat
+- support animated images in Android app
+- German language in mobile apps UI
+
+Sep 1, 2022 [v3.2: Incognito mode](./20220901-simplex-chat-v3.2-incognito-mode.md)
+
+- Incognito mode - use a new random profile name for each contact
+- use .onion server addresses with Tor
+- endless scrolling and search
+- choose accent color and dark mode
+- reduced APK size for direct download and in F-Droid repo from 200 to 46Mb!
+
+Implementation audit is arranged for October!
+
+Aug 8, 2022 [v3.1: chat groups](./20220808-simplex-chat-v3.1-chat-groups.md)
+
+- finally, secret chat groups - nobody but members know they exist!
+- access to messaging servers via Tor on all platforms
+- advanced network settings to optimize traffic usage
+- published chat protocol
+- new app icons
+
+Jul 23, 2022 [v3.1-beta: access servers via Tor](./20220723-simplex-chat-v3.1-tor-groups-efficiency.md)
+
+- terminal app: access to messaging servers via SOCKS5 proxy (e.g., Tor).
+- mobile apps: join and leave chat groups.
+- optimized battery and traffic usage - up to 90x reduction!
+- two docker configurations for self-hosted SMP servers.
+
+Jul 11, 2022 [v3: instant push notifications for iOS and audio/video calls](./20220711-simplex-chat-v3-released-ios-notifications-audio-video-calls-database-export-import-protocol-improvements.md):
+
 - chat database export and import
+- end-to-end encrypted audio/video calls
 - protocol privacy and performance improvements
 
 Jun 4, 2022 [v2.2: the new Privacy and Security settings](./20220604-simplex-chat-new-privacy-security-settings.md)

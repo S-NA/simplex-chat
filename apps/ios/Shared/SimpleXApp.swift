@@ -25,6 +25,8 @@ struct SimpleXApp: App {
     init() {
         hs_init(0, nil)
         UserDefaults.standard.register(defaults: appDefaults)
+        setGroupDefaults()
+        registerGroupDefaults()
         setDbContainer()
         BGManager.shared.register()
         NtfManager.shared.registerCategories()
@@ -39,11 +41,13 @@ struct SimpleXApp: App {
                     chatModel.appOpenUrl = url
                 }
                 .onAppear() {
-                    do {
-                        chatModel.v3DBMigration = v3DBMigrationDefault.get()
-                        try initializeChat(start: chatModel.v3DBMigration.startChat)
-                    } catch let error {
-                        fatalError("Failed to start or load chats: \(responseError(error))")
+                    if (!chatModel.chatInitialized) {
+                        do {
+                            chatModel.v3DBMigration = v3DBMigrationDefault.get()
+                            try initializeChat(start: chatModel.v3DBMigration.startChat)
+                        } catch let error {
+                            fatalError("Failed to start or load chats: \(responseError(error))")
+                        }
                     }
                 }
                 .onChange(of: scenePhase) { phase in
@@ -56,6 +60,7 @@ struct SimpleXApp: App {
                             enteredBackground = ProcessInfo.processInfo.systemUptime
                         }
                         doAuthenticate = false
+                        NtfManager.shared.setNtfBadgeCount(chatModel.totalUnreadCount())
                     case .active:
                         if chatModel.chatRunning == true {
                             ChatReceiver.shared.start()
@@ -113,10 +118,11 @@ struct SimpleXApp: App {
             if let id = chatModel.chatId,
                let chat = chatModel.getChat(id) {
                 loadChat(chat: chat)
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
-                    if chatModel.chatId == chat.id {
-                        Task { await markChatRead(chat) }
-                    }
+            }
+            if let chatId = chatModel.ntfContactRequest {
+                chatModel.ntfContactRequest = nil
+                if case let .contactRequest(contactRequest) = chatModel.getChat(chatId)?.chatInfo {
+                    Task { await acceptContactRequest(contactRequest) }
                 }
             }
         } catch let error {
@@ -127,8 +133,7 @@ struct SimpleXApp: App {
     private func updateCallInvitations() {
         do {
             try refreshCallInvitations()
-        }
-        catch let error {
+        } catch let error {
             logger.error("apiGetCallInvitations: cannot update call invitations \(responseError(error))")
         }
     }

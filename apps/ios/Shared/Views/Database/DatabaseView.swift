@@ -11,21 +11,27 @@ import SimpleXChat
 
 enum DatabaseAlert: Identifiable {
     case stopChat
+    case exportProhibited
     case importArchive
     case archiveImported
     case deleteChat
     case chatDeleted
     case deleteLegacyDatabase
+    case deleteFilesAndMedia
+    case setChatItemTTL(ttl: ChatItemTTL)
     case error(title: LocalizedStringKey, error: String = "")
 
     var id: String {
         switch self {
         case .stopChat: return "stopChat"
+        case .exportProhibited: return "exportProhibited"
         case .importArchive: return "importArchive"
         case .archiveImported: return "archiveImported"
         case .deleteChat: return "deleteChat"
         case .chatDeleted: return "chatDeleted"
         case .deleteLegacyDatabase: return "deleteLegacyDatabase"
+        case .deleteFilesAndMedia: return "deleteFilesAndMedia"
+        case .setChatItemTTL: return "setChatItemTTL"
         case let .error(title, _): return "error \(title)"
         }
     }
@@ -43,6 +49,11 @@ struct DatabaseView: View {
     @AppStorage(DEFAULT_CHAT_ARCHIVE_TIME) private var chatArchiveTime: Double = 0
     @State private var dbContainer = dbContainerGroupDefault.get()
     @State private var legacyDatabase = hasLegacyDatabase()
+    @State private var useKeychain = storeDBPassphraseGroupDefault.get()
+    @State private var appFilesCountAndSize: (Int, Int)?
+
+    @State var chatItemTTL: ChatItemTTL
+    @State private var currentChatItemTTL: ChatItemTTL = .none
 
     var body: some View {
         ZStack {
@@ -82,18 +93,28 @@ struct DatabaseView: View {
             }
 
             Section {
-                settingsRow("square.and.arrow.up") {
-                    Button {
-                        exportArchive()
+                let unencrypted = m.chatDbEncrypted == false
+                let color: Color = unencrypted ? .orange : .secondary
+                settingsRow(unencrypted ? "lock.open" : useKeychain ? "key" : "lock", color: color) {
+                    NavigationLink {
+                        DatabaseEncryptionView(useKeychain: $useKeychain)
+                            .navigationTitle("Database passphrase")
                     } label: {
-                        Text("Export database")
+                        Text("Database passphrase")
+                    }
+                }
+                settingsRow("square.and.arrow.up") {
+                    Button("Export database") {
+                        if initialRandomDBPassphraseGroupDefault.get() && !unencrypted {
+                            alert = .exportProhibited
+                        } else {
+                            exportArchive()
+                        }
                     }
                 }
                 settingsRow("square.and.arrow.down") {
-                    Button(role: .destructive) {
+                    Button("Import database", role: .destructive) {
                         showFileImporter = true
-                    } label: {
-                        Text("Import database")
                     }
                 }
                 if let archiveName = chatArchiveName {
@@ -110,10 +131,8 @@ struct DatabaseView: View {
                     }
                 }
                 settingsRow("trash.slash") {
-                    Button(role: .destructive) {
+                    Button("Delete database", role: .destructive) {
                         alert = .deleteChat
-                    } label: {
-                        Text("Delete database")
                     }
                 }
             } header: {
@@ -130,16 +149,52 @@ struct DatabaseView: View {
             if case .group = dbContainer, legacyDatabase {
                 Section("Old database") {
                     settingsRow("trash") {
-                        Button {
+                        Button("Delete old database") {
                             alert = .deleteLegacyDatabase
-                        } label: {
-                            Text("Delete old database")
                         }
                     }
                 }
             }
+
+            Section {
+                Picker("Delete messages after", selection: $chatItemTTL) {
+                    ForEach([ChatItemTTL.none, ChatItemTTL.month, ChatItemTTL.week, ChatItemTTL.day]) { ttl in
+                        Text(ttl.deleteAfterText).tag(ttl)
+                    }
+                    if case .seconds = chatItemTTL {
+                        Text(chatItemTTL.deleteAfterText).tag(chatItemTTL)
+                    }
+                }
+                .frame(height: 36)
+                .disabled(m.chatDbChanged || progressIndicator)
+                Button("Delete files & media", role: .destructive) {
+                    alert = .deleteFilesAndMedia
+                }
+                .disabled(!stopped || appFilesCountAndSize?.0 == 0)
+            } header: {
+                Text("Data")
+            } footer: {
+                if let (fileCount, size) = appFilesCountAndSize {
+                    if fileCount == 0 {
+                        Text("No received or sent files")
+                    } else {
+                        Text("\(fileCount) file(s) with total size of \(ByteCountFormatter().string(fromByteCount: Int64(size)))")
+                    }
+                }
+            }
         }
-        .onAppear { runChat = m.chatRunning ?? true }
+        .onAppear {
+            runChat = m.chatRunning ?? true
+            appFilesCountAndSize = directoryFileCountAndSize(getAppFilesDirectory())
+            currentChatItemTTL = chatItemTTL
+        }
+        .onChange(of: chatItemTTL) { ttl in
+            if ttl < currentChatItemTTL {
+                alert = .setChatItemTTL(ttl: ttl)
+            } else if ttl != currentChatItemTTL {
+                setCiTTL(ttl)
+            }
+        }
         .alert(item: $alert) { item in databaseAlert(item) }
         .fileImporter(
             isPresented: $showFileImporter,
@@ -160,11 +215,16 @@ struct DatabaseView: View {
                 title: Text("Stop chat?"),
                 message: Text("Stop chat to export, import or delete chat database. You will not be able to receive and send messages while the chat is stopped."),
                 primaryButton: .destructive(Text("Stop")) {
-                    stopChat()
+                    authStopChat()
                 },
                 secondaryButton: .cancel {
                     withAnimation { runChat = true }
                 }
+            )
+        case .exportProhibited:
+            return Alert(
+                title: Text("Set passphrase to export"),
+                message: Text("Database is encrypted using a random passphrase. Please change it before exporting.")
             )
         case .importArchive:
             if let fileURL = importedArchivePath {
@@ -208,8 +268,42 @@ struct DatabaseView: View {
                 },
                 secondaryButton: .cancel()
             )
+        case .deleteFilesAndMedia:
+            return Alert(
+                title: Text("Delete files and media?"),
+                message: Text("This action cannot be undone - all received and sent files and media will be deleted. Low resolution pictures will remain."),
+                primaryButton: .destructive(Text("Delete")) {
+                    deleteFiles()
+                },
+                secondaryButton: .cancel()
+            )
+        case let .setChatItemTTL(ttl):
+            return Alert(
+                title: Text("Enable automatic message deletion?"),
+                message: Text("This action cannot be undone - the messages sent and received earlier than selected will be deleted. It may take several minutes."),
+                primaryButton: .destructive(Text("Delete messages")) {
+                    setCiTTL(ttl)
+                },
+                secondaryButton: .cancel() {
+                    chatItemTTL = currentChatItemTTL
+                }
+            )
         case let .error(title, error):
             return Alert(title: Text(title), message: Text("\(error)"))
+        }
+    }
+
+    private func authStopChat() {
+        if UserDefaults.standard.bool(forKey: DEFAULT_PERFORM_LA) {
+            authenticate(reason: NSLocalizedString("Stop SimpleX", comment: "authentication reason")) { laResult in
+                switch laResult {
+                case .success: stopChat()
+                case .unavailable: stopChat()
+                case .failed: withAnimation { runChat = true }
+                }
+            }
+        } else {
+            stopChat()
         }
     }
 
@@ -254,6 +348,7 @@ struct DatabaseView: View {
                     do {
                         let config = ArchiveConfig(archivePath: archivePath.path)
                         try await apiImportArchive(config: config)
+                        _ = removeDatabaseKey()
                         await operationEnded(.archiveImported)
                     } catch let error {
                         await operationEnded(.error(title: "Error importing chat database", error: responseError(error)))
@@ -273,7 +368,10 @@ struct DatabaseView: View {
         Task {
             do {
                 try await apiDeleteStorage()
+                _ = removeDatabaseKey()
+                storeDBPassphraseGroupDefault.set(true)
                 await operationEnded(.chatDeleted)
+                appFilesCountAndSize = directoryFileCountAndSize(getAppFilesDirectory())
             } catch let error {
                 await operationEnded(.error(title: "Error deleting database", error: responseError(error)))
             }
@@ -291,6 +389,7 @@ struct DatabaseView: View {
     private func operationEnded(_ dbAlert: DatabaseAlert) async {
         await MainActor.run {
             m.chatDbChanged = true
+            m.chatInitialized = false
             progressIndicator = false
             alert = dbAlert
         }
@@ -323,10 +422,47 @@ struct DatabaseView: View {
             }
         }
     }
+
+    private func setCiTTL(_ ttl: ChatItemTTL) {
+        logger.debug("DatabaseView setChatItemTTL \(ttl.seconds ?? -1)")
+        progressIndicator = true
+        Task {
+            do {
+                try await setChatItemTTL(ttl)
+                await MainActor.run {
+                    m.chatItemTTL = ttl
+                    currentChatItemTTL = ttl
+                    afterSetCiTTL()
+                }
+            } catch {
+                await MainActor.run {
+                    alert = .error(title: "Error changing setting", error: responseError(error))
+                    chatItemTTL = currentChatItemTTL
+                    afterSetCiTTL()
+                }
+            }
+        }
+    }
+
+    private func afterSetCiTTL() {
+        progressIndicator = false
+        appFilesCountAndSize = directoryFileCountAndSize(getAppFilesDirectory())
+        do {
+            let chats = try apiGetChats()
+            m.updateChats(with: chats)
+        } catch let error {
+            logger.error("apiGetChats: cannot update chats \(responseError(error))")
+        }
+    }
+
+    private func deleteFiles() {
+        deleteAppFiles()
+        appFilesCountAndSize = directoryFileCountAndSize(getAppFilesDirectory())
+    }
 }
 
 struct DatabaseView_Previews: PreviewProvider {
     static var previews: some View {
-        DatabaseView(showSettings: Binding.constant(false))
+        DatabaseView(showSettings: Binding.constant(false), chatItemTTL: .none)
     }
 }

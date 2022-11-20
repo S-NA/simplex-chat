@@ -1,5 +1,7 @@
 package chat.simplex.app.views.helpers
 
+import android.R.attr.factor
+import android.R.color
 import android.content.Context
 import android.content.res.Resources
 import android.graphics.*
@@ -10,8 +12,11 @@ import android.provider.OpenableColumns
 import android.text.Spanned
 import android.text.SpannedString
 import android.text.style.*
+import android.util.Base64
 import android.util.Log
+import android.view.View
 import android.view.ViewTreeObserver
+import android.view.inputmethod.InputMethodManager
 import androidx.annotation.StringRes
 import androidx.compose.runtime.*
 import androidx.compose.ui.graphics.Color
@@ -23,16 +28,13 @@ import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.*
 import androidx.core.content.FileProvider
 import androidx.core.text.HtmlCompat
-import chat.simplex.app.BuildConfig
-import chat.simplex.app.SimplexApp
+import chat.simplex.app.*
 import chat.simplex.app.model.CIFile
 import kotlinx.coroutines.*
-import java.io.File
-import java.io.FileOutputStream
+import java.io.*
 import java.text.SimpleDateFormat
 import java.util.*
-import kotlin.math.log2
-import kotlin.math.pow
+import kotlin.math.*
 
 fun withApi(action: suspend CoroutineScope.() -> Unit): Job = withScope(GlobalScope, action)
 
@@ -68,6 +70,9 @@ fun getKeyboardState(): State<KeyboardState> {
 
   return keyboardState
 }
+
+fun hideKeyboard(view: View) =
+  (SimplexApp.context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager).hideSoftInputFromWindow(view.windowToken, 0)
 
 // Resource to annotated string from
 // https://stackoverflow.com/questions/68549248/android-jetpack-compose-how-to-show-styled-text-from-string-resources
@@ -214,6 +219,7 @@ private fun spannableStringToAnnotatedString(
 
 // maximum image file size to be auto-accepted
 const val MAX_IMAGE_SIZE: Long = 236700
+const val MAX_IMAGE_SIZE_AUTO_RCV: Long = MAX_IMAGE_SIZE * 2
 const val MAX_FILE_SIZE: Long = 8000000
 
 fun getFilesDirectory(context: Context): String {
@@ -245,7 +251,7 @@ fun getLoadedImage(context: Context, file: CIFile?): Bitmap? {
       val uri = FileProvider.getUriForFile(context, "${BuildConfig.APPLICATION_ID}.provider", File(filePath))
       val parcelFileDescriptor = context.contentResolver.openFileDescriptor(uri, "r")
       val fileDescriptor = parcelFileDescriptor?.fileDescriptor
-      val image = BitmapFactory.decodeFileDescriptor(fileDescriptor)
+      val image = decodeSampledBitmapFromFileDescriptor(fileDescriptor, 1000, 1000)
       parcelFileDescriptor?.close()
       image
     } catch (e: Exception) {
@@ -254,6 +260,39 @@ fun getLoadedImage(context: Context, file: CIFile?): Bitmap? {
   } else {
     null
   }
+}
+
+// https://developer.android.com/topic/performance/graphics/load-bitmap#load-bitmap
+private fun decodeSampledBitmapFromFileDescriptor(fileDescriptor: FileDescriptor?, reqWidth: Int, reqHeight: Int): Bitmap {
+  // First decode with inJustDecodeBounds=true to check dimensions
+  return BitmapFactory.Options().run {
+    inJustDecodeBounds = true
+    BitmapFactory.decodeFileDescriptor(fileDescriptor, null, this)
+    // Calculate inSampleSize
+    inSampleSize = calculateInSampleSize(this, reqWidth, reqHeight)
+    // Decode bitmap with inSampleSize set
+    inJustDecodeBounds = false
+
+    BitmapFactory.decodeFileDescriptor(fileDescriptor, null, this)
+  }
+}
+
+private fun calculateInSampleSize(options: BitmapFactory.Options, reqWidth: Int, reqHeight: Int): Int {
+  // Raw height and width of image
+  val (height: Int, width: Int) = options.run { outHeight to outWidth }
+  var inSampleSize = 1
+
+  if (height > reqHeight || width > reqWidth) {
+    val halfHeight: Int = height / 2
+    val halfWidth: Int = width / 2
+    // Calculate the largest inSampleSize value that is a power of 2 and keeps both
+    // height and width larger than the requested height and width.
+    while (halfHeight / inSampleSize >= reqHeight && halfWidth / inSampleSize >= reqWidth) {
+      inSampleSize *= 2
+    }
+  }
+
+  return inSampleSize
 }
 
 fun getFileName(context: Context, uri: Uri): String? {
@@ -272,11 +311,18 @@ fun getFileSize(context: Context, uri: Uri): Long? {
   }
 }
 
+fun saveImage(context: Context, uri: Uri): String? {
+  val source = ImageDecoder.createSource(SimplexApp.context.contentResolver, uri)
+  val bitmap = ImageDecoder.decodeBitmap(source)
+  return saveImage(context, bitmap)
+}
+
 fun saveImage(context: Context, image: Bitmap): String? {
   return try {
-    val dataResized = resizeImageToDataSize(image, maxDataSize = MAX_IMAGE_SIZE)
+    val ext = if (image.hasAlpha()) "png" else "jpg"
+    val dataResized = resizeImageToDataSize(image, ext == "png", maxDataSize = MAX_IMAGE_SIZE)
     val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
-    val fileToSave = uniqueCombine(context, "IMG_${timestamp}.jpg")
+    val fileToSave = uniqueCombine(context, "IMG_${timestamp}.$ext")
     val file = File(getAppFilePath(context, fileToSave))
     val output = FileOutputStream(file)
     dataResized.writeTo(output)
@@ -285,6 +331,32 @@ fun saveImage(context: Context, image: Bitmap): String? {
     fileToSave
   } catch (e: Exception) {
     Log.e(chat.simplex.app.TAG, "Util.kt saveImage error: ${e.message}")
+    null
+  }
+}
+
+fun saveAnimImage(context: Context, uri: Uri): String? {
+  return try {
+    val filename = getFileName(context, uri)?.lowercase()
+    var ext = when {
+      // remove everything but extension
+      filename?.contains(".") == true -> filename.replaceBeforeLast('.', "").replace(".", "")
+      else -> "gif"
+    }
+    // Just in case the image has a strange extension
+    if (ext.length < 3 || ext.length > 4) ext = "gif"
+    val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+    val fileToSave = uniqueCombine(context, "IMG_${timestamp}.$ext")
+    val file = File(getAppFilePath(context, fileToSave))
+    val output = FileOutputStream(file)
+    context.contentResolver.openInputStream(uri)!!.use { input ->
+      output.use { output ->
+        input.copyTo(output)
+      }
+    }
+    fileToSave
+  } catch (e: Exception) {
+    Log.e(chat.simplex.app.TAG, "Util.kt saveAnimImage error: ${e.message}")
     null
   }
 }
@@ -345,3 +417,35 @@ fun removeFile(context: Context, fileName: String): Boolean {
   }
   return fileDeleted
 }
+
+fun deleteAppFiles(context: Context) {
+  val dir = File(getAppFilesDirectory(context))
+  try {
+    dir.list()?.forEach {
+      removeFile(context, it)
+    }
+  } catch (e: java.lang.Exception) {
+    Log.e(TAG, "Util deleteAppFiles error: ${e.stackTraceToString()}")
+  }
+}
+
+fun directoryFileCountAndSize(dir: String): Pair<Int, Long> { // count, size in bytes
+  var fileCount = 0
+  var bytes = 0L
+  try {
+    File(dir).listFiles()?.forEach {
+      fileCount++
+      bytes += it.length()
+    }
+  } catch (e: java.lang.Exception) {
+    Log.e(TAG, "Util directoryFileCountAndSize error: ${e.stackTraceToString()}")
+  }
+  return fileCount to bytes
+}
+
+fun Color.darker(factor: Float = 0.1f): Color =
+  Color(max(red * (1 - factor), 0f), max(green * (1 - factor), 0f), max(blue * (1 - factor), 0f), alpha)
+
+fun ByteArray.toBase64String() = Base64.encodeToString(this, Base64.DEFAULT)
+
+fun String.toByteArrayFromBase64() = Base64.decode(this, Base64.DEFAULT)

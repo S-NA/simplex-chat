@@ -2,13 +2,14 @@ package chat.simplex.app
 
 import android.app.*
 import android.content.*
+import android.content.pm.PackageManager
 import android.os.*
+import android.provider.Settings
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import androidx.work.*
-import chat.simplex.app.model.AppPreferences
-import chat.simplex.app.views.helpers.withApi
+import chat.simplex.app.views.helpers.*
 import chat.simplex.app.views.onboarding.OnboardingStage
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -21,10 +22,8 @@ class SimplexService: Service() {
   private var wakeLock: PowerManager.WakeLock? = null
   private var isServiceStarted = false
   private var isStartingService = false
-  private var isStoppingService = false
   private var notificationManager: NotificationManager? = null
   private var serviceNotification: Notification? = null
-  private val chatController by lazy { (application as SimplexApp).chatController }
 
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
     Log.d(TAG, "onStartCommand startId: $startId")
@@ -33,7 +32,6 @@ class SimplexService: Service() {
       Log.d(TAG, "intent action $action")
       when (action) {
         Action.START.name -> startService()
-        Action.STOP.name -> stopService()
         else -> Log.e(TAG, "No action in the intent")
       }
     } else {
@@ -55,7 +53,10 @@ class SimplexService: Service() {
   override fun onDestroy() {
     Log.d(TAG, "Simplex service destroyed")
     stopService()
-    sendBroadcast(Intent(this, AutoRestartReceiver::class.java)) // Restart if necessary!
+
+    // If notification service is enabled and battery optimization is disabled, restart the service
+    if (SimplexApp.context.allowToStartServiceAfterAppExit())
+      sendBroadcast(Intent(this, AutoRestartReceiver::class.java))
     super.onDestroy()
   }
 
@@ -65,19 +66,21 @@ class SimplexService: Service() {
     val self = this
     isStartingService = true
     withApi {
+      val chatController = (application as SimplexApp).chatController
       try {
-        val user = chatController.apiGetActiveUser()
-        if (user == null) {
-          chatController.chatModel.onboardingStage.value = OnboardingStage.Step1_SimpleXInfo
-        } else {
-          Log.w(TAG, "Starting foreground service")
-          chatController.startChat(user)
-          isServiceStarted = true
-          saveServiceState(self, ServiceState.STARTED)
-          wakeLock = (getSystemService(Context.POWER_SERVICE) as PowerManager).run {
-            newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, WAKE_LOCK_TAG).apply {
-              acquire()
-            }
+        Log.w(TAG, "Starting foreground service")
+        val chatDbStatus = chatController.chatModel.chatDbStatus.value
+        if (chatDbStatus != DBMigrationResult.OK) {
+          Log.w(chat.simplex.app.TAG, "SimplexService: problem with the database: $chatDbStatus")
+          showPassphraseNotification(chatDbStatus)
+          stopService()
+          return@withApi
+        }
+        isServiceStarted = true
+        saveServiceState(self, ServiceState.STARTED)
+        wakeLock = (getSystemService(Context.POWER_SERVICE) as PowerManager).run {
+          newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, WAKE_LOCK_TAG).apply {
+            acquire()
           }
         }
       } finally {
@@ -88,8 +91,6 @@ class SimplexService: Service() {
 
   private fun stopService() {
     Log.d(TAG, "Stopping foreground service")
-    if (isStoppingService) return
-    isStoppingService = true
     try {
       wakeLock?.let {
         while (it.isHeld) it.release() // release all, in case acquired more than once
@@ -100,7 +101,6 @@ class SimplexService: Service() {
     } catch (e: Exception) {
       Log.d(TAG, "Service stopped without being started: ${e.message}")
     }
-    isStoppingService = false
     isServiceStarted = false
     saveServiceState(this, ServiceState.STOPPED)
   }
@@ -122,15 +122,27 @@ class SimplexService: Service() {
     val pendingIntent: PendingIntent = Intent(this, MainActivity::class.java).let { notificationIntent ->
       PendingIntent.getActivity(this, 0, notificationIntent, PendingIntent.FLAG_IMMUTABLE)
     }
-    return NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
+
+    val builder =  NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
       .setSmallIcon(R.drawable.ntf_service_icon)
       .setColor(0x88FFFF)
       .setContentTitle(title)
       .setContentText(text)
       .setContentIntent(pendingIntent)
-      .setSound(null)
+      .setSilent(true)
       .setShowWhen(false) // no date/time
-      .build()
+
+    // Shows a button which opens notification channel settings
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+      val flags = PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+      val setupIntent = Intent(Settings.ACTION_CHANNEL_NOTIFICATION_SETTINGS)
+      setupIntent.putExtra(Settings.EXTRA_APP_PACKAGE, packageName)
+      setupIntent.putExtra(Settings.EXTRA_CHANNEL_ID, NOTIFICATION_CHANNEL_ID)
+      val setup = PendingIntent.getActivity(this, 0, setupIntent, flags)
+      builder.addAction(0, getString(R.string.hide_notification), setup)
+    }
+
+    return builder.build()
   }
 
   override fun onBind(intent: Intent): IBinder? {
@@ -139,6 +151,14 @@ class SimplexService: Service() {
 
   // re-schedules the task when "Clear recent apps" is pressed
   override fun onTaskRemoved(rootIntent: Intent) {
+    // Just to make sure that after restart of the app the user will need to re-authenticate
+    MainActivity.clearAuthState()
+
+    // If notification service isn't enabled or battery optimization isn't disabled, we shouldn't restart the service
+    if (!SimplexApp.context.allowToStartServiceAfterAppExit()) {
+      return
+    }
+
     val restartServiceIntent = Intent(applicationContext, SimplexService::class.java).also {
       it.setPackage(packageName)
     };
@@ -153,6 +173,17 @@ class SimplexService: Service() {
     override fun onReceive(context: Context, intent: Intent) {
       Log.d(TAG, "StartReceiver: onReceive called")
       scheduleStart(context)
+    }
+    companion object {
+      fun toggleReceiver(enable: Boolean) {
+        Log.d(TAG, "StartReceiver: toggleReceiver enabled: $enable")
+        val component = ComponentName(BuildConfig.APPLICATION_ID, StartReceiver::class.java.name)
+        SimplexApp.context.packageManager.setComponentEnabledSetting(
+          component,
+          if (enable) PackageManager.COMPONENT_ENABLED_STATE_ENABLED else PackageManager.COMPONENT_ENABLED_STATE_DISABLED,
+          PackageManager.DONT_KILL_APP
+        )
+      }
     }
   }
 
@@ -181,7 +212,6 @@ class SimplexService: Service() {
 
   enum class Action {
     START,
-    STOP
   }
 
   enum class ServiceState {
@@ -198,6 +228,8 @@ class SimplexService: Service() {
     const val SERVICE_START_WORKER_INTERVAL_MINUTES = 3 * 60L
     const val SERVICE_START_WORKER_WORK_NAME_PERIODIC = "SimplexAutoRestartWorkerPeriodic" // Do not change!
 
+    private const val PASSPHRASE_NOTIFICATION_ID = 1535
+
     private const val WAKE_LOCK_TAG = "SimplexService::lock"
     private const val SHARED_PREFS_ID = "chat.simplex.app.SIMPLEX_SERVICE_PREFS"
     private const val SHARED_PREFS_SERVICE_STATE = "SIMPLEX_SERVICE_STATE"
@@ -212,10 +244,9 @@ class SimplexService: Service() {
 
     suspend fun start(context: Context) = serviceAction(context, Action.START)
 
-    suspend fun stop(context: Context) = serviceAction(context, Action.STOP)
+    fun stop(context: Context) = context.stopService(Intent(context, SimplexService::class.java))
 
     private suspend fun serviceAction(context: Context, action: Action) {
-      if (!AppPreferences(context).runServiceInBackground.get()) { return }
       Log.d(TAG, "SimplexService serviceAction: ${action.name}")
       withContext(Dispatchers.IO) {
         Intent(context, SimplexService::class.java).also {
@@ -241,6 +272,41 @@ class SimplexService: Service() {
       val value = getPreferences(context)
         .getString(SHARED_PREFS_SERVICE_STATE, ServiceState.STOPPED.name)
       return ServiceState.valueOf(value!!)
+    }
+
+    fun showPassphraseNotification(chatDbStatus: DBMigrationResult?) {
+      val pendingIntent: PendingIntent = Intent(SimplexApp.context, MainActivity::class.java).let { notificationIntent ->
+        PendingIntent.getActivity(SimplexApp.context, 0, notificationIntent, PendingIntent.FLAG_IMMUTABLE)
+      }
+
+      val title = when(chatDbStatus) {
+        is DBMigrationResult.ErrorNotADatabase -> generalGetString(R.string.enter_passphrase_notification_title)
+        is DBMigrationResult.OK -> return
+        else -> generalGetString(R.string.database_initialization_error_title)
+      }
+
+      val description = when(chatDbStatus) {
+        is DBMigrationResult.ErrorNotADatabase -> generalGetString(R.string.enter_passphrase_notification_desc)
+        is DBMigrationResult.OK -> return
+        else -> generalGetString(R.string.database_initialization_error_desc)
+      }
+
+      val builder =  NotificationCompat.Builder(SimplexApp.context, NOTIFICATION_CHANNEL_ID)
+        .setSmallIcon(R.drawable.ntf_service_icon)
+        .setColor(0x88FFFF)
+        .setContentTitle(title)
+        .setContentText(description)
+        .setContentIntent(pendingIntent)
+        .setSilent(true)
+        .setShowWhen(false)
+
+      val notificationManager = SimplexApp.context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+      notificationManager.notify(PASSPHRASE_NOTIFICATION_ID, builder.build())
+    }
+
+    fun cancelPassphraseNotification() {
+      val notificationManager = SimplexApp.context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+      notificationManager.cancel(PASSPHRASE_NOTIFICATION_ID)
     }
 
     private fun getPreferences(context: Context): SharedPreferences = context.getSharedPreferences(SHARED_PREFS_ID, Context.MODE_PRIVATE)

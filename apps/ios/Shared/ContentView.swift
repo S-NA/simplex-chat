@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import SimpleXChat
 
 struct ContentView: View {
     @EnvironmentObject var chatModel: ChatModel
@@ -13,7 +14,6 @@ struct ContentView: View {
     @ObservedObject var callController = CallController.shared
     @Binding var doAuthenticate: Bool
     @Binding var userAuthorized: Bool?
-    @State private var showChatInfo: Bool = false // TODO comprehensively close modal views on authentication
     @AppStorage(DEFAULT_SHOW_LA_NOTICE) private var prefShowLANotice = false
     @AppStorage(DEFAULT_LA_NOTICE_SHOWN) private var prefLANoticeShown = false
     @AppStorage(DEFAULT_PERFORM_LA) private var prefPerformLA = false
@@ -22,6 +22,8 @@ struct ContentView: View {
         ZStack {
             if prefPerformLA && userAuthorized != true {
                 Button(action: runAuthenticate) { Label("Unlock", systemImage: "lock") }
+            } else if let status = chatModel.chatDbStatus, status != .ok {
+                DatabaseErrorView(status: status)
             } else if !chatModel.v3DBMigration.startChat {
                 MigrateToAppGroupView()
             } else if let step = chatModel.onboardingStage  {
@@ -42,7 +44,7 @@ struct ContentView: View {
 
     private func mainView() -> some View {
         ZStack(alignment: .top) {
-            ChatListView(showChatInfo: $showChatInfo)
+            ChatListView()
             .onAppear {
                 NtfManager.shared.requestAuthorization(onDeny: {
                     alertManager.showAlert(notificationAlert())
@@ -64,13 +66,11 @@ struct ContentView: View {
     private func runAuthenticate() {
         if !prefPerformLA {
             userAuthorized = true
-        } else if showChatInfo {
-            showChatInfo = false
-            DispatchQueue.main.async {
+        } else {
+            dismissAllSheets(animated: false) {
                 justAuthenticate()
             }
-        } else {
-            justAuthenticate()
+            chatModel.chatId = nil
         }
     }
 
@@ -81,7 +81,7 @@ struct ContentView: View {
             case .success:
                 userAuthorized = true
             case .failed:
-                AlertManager.shared.showAlert(laFailedAlert())
+                break
             case .unavailable:
                 userAuthorized = true
                 prefPerformLA = false

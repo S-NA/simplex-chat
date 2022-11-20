@@ -11,70 +11,148 @@ import SimpleXChat
 
 struct ChatListView: View {
     @EnvironmentObject var chatModel: ChatModel
-    @Binding var showChatInfo: Bool
     // not really used in this view
     @State private var showSettings = false
     @State private var searchText = ""
-    @AppStorage(DEFAULT_PENDING_CONNECTIONS) private var pendingConnections = true
+    @State private var selectedChat: ChatId?
+    @State private var showAddChat = false
 
     var body: some View {
-        let v = NavigationView {
-            List {
-                ForEach(filteredChats(), id: \.viewId) { chat in
-                    ChatListNavLink(chat: chat, showChatInfo: $showChatInfo)
-                        .padding(.trailing, -16)
-                        .disabled(chatModel.chatRunning != true)
+        NavigationView {
+            VStack {
+                if chatModel.chats.isEmpty {
+                    onboardingButtons()
                 }
-            }
-            .onChange(of: chatModel.chatId) { _ in
-                if chatModel.chatId == nil, let chatId = chatModel.chatToTop {
-                    chatModel.chatToTop = nil
-                    chatModel.popChat(chatId)
-                }
-            }
-            .onChange(of: chatModel.chats.isEmpty) { empty in
-                if !empty { return }
-                withAnimation { chatModel.onboardingStage = .step4_MakeConnection }
-            }
-            .onChange(of: chatModel.appOpenUrl) { _ in connectViaUrl() }
-            .onAppear() { connectViaUrl() }
-            .offset(x: -8)
-            .listStyle(.plain)
-            .navigationTitle("Your chats")
-            .navigationBarTitleDisplayMode(chatModel.chats.count > 8 ? .inline : .large)
-            .toolbar {
-                ToolbarItem(placement: .navigationBarLeading) {
-                    SettingsButton()
-                }
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    switch chatModel.chatRunning {
-                    case .some(true): NewChatButton()
-                    case .some(false): chatStoppedIcon()
-                    case .none: EmptyView()
-                    }
+                if chatModel.chats.count > 8 {
+                    chatList.searchable(text: $searchText)
+                } else {
+                    chatList
                 }
             }
         }
         .navigationViewStyle(.stack)
+    }
 
-        if chatModel.chats.count > 8 {
-            v.searchable(text: $searchText)
-        } else {
-            v
+    var chatList: some View {
+        List {
+            ForEach(filteredChats(), id: \.viewId) { chat in
+                ChatListNavLink(chat: chat)
+                    .padding(.trailing, -16)
+                    .disabled(chatModel.chatRunning != true)
+            }
+        }
+        .onChange(of: chatModel.chatId) { _ in
+            selectedChat = chatModel.chatId
+            if chatModel.chatId == nil, let chatId = chatModel.chatToTop {
+                chatModel.chatToTop = nil
+                chatModel.popChat(chatId)
+            }
+        }
+        .onChange(of: chatModel.appOpenUrl) { _ in connectViaUrl() }
+        .onAppear() { connectViaUrl() }
+        .offset(x: -8)
+        .listStyle(.plain)
+        .navigationTitle("Your chats")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .navigationBarLeading) {
+                SettingsButton()
+            }
+            ToolbarItem(placement: .principal) {
+                if (chatModel.incognito) {
+                    HStack {
+                        if (chatModel.chats.count > 8) {
+                            Text("Your chats").font(.headline)
+                            Spacer().frame(width: 16)
+                        }
+                        Image(systemName: "theatermasks").frame(maxWidth: 24, maxHeight: 24, alignment: .center).foregroundColor(.indigo)
+                    }
+                }
+            }
+            ToolbarItem(placement: .navigationBarTrailing) {
+                switch chatModel.chatRunning {
+                case .some(true): NewChatButton(showAddChat: $showAddChat)
+                case .some(false): chatStoppedIcon()
+                case .none: EmptyView()
+                }
+            }
+        }
+        .background(
+            NavigationLink(
+                destination: chatView(selectedChat),
+                isActive: Binding(
+                    get: { selectedChat != nil },
+                    set: { _, _ in selectedChat = nil }
+                )
+            ) { EmptyView() }
+        )
+    }
+
+    private func onboardingButtons() -> some View {
+        VStack(alignment: .trailing, spacing: 0) {
+            Path { p in
+                p.move(to: CGPoint(x: 8, y: 0))
+                p.addLine(to: CGPoint(x: 16, y: 10))
+                p.addLine(to: CGPoint(x: 0, y: 10))
+                p.addLine(to: CGPoint(x: 8, y: 0))
+            }
+            .fill(Color.accentColor)
+            .frame(width: 20, height: 10)
+            .padding(.trailing, 12)
+
+            connectButton("Tap to start a new chat") {
+                showAddChat = true
+            }
+
+            connectButton("or chat with the developers") {
+                DispatchQueue.main.async {
+                    UIApplication.shared.open(simplexTeamURL)
+                }
+            }
+            .padding(.top, 10)
+
+            Spacer()
+            Text("You have no chats")
+                .foregroundColor(.secondary)
+                .frame(maxWidth: .infinity)
+        }
+        .padding(.trailing, 6)
+        .frame(maxHeight: .infinity)
+    }
+
+    private func connectButton(_ label: LocalizedStringKey, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(label)
+                .padding(.vertical, 10)
+                .padding(.horizontal, 20)
+        }
+        .background(Color.accentColor)
+        .foregroundColor(.white)
+        .clipShape(RoundedRectangle(cornerRadius: 16))
+    }
+
+    @ViewBuilder private func chatView(_ chatId: ChatId?) -> some View {
+        if let chatId = chatId, let chat = chatModel.getChat(chatId) {
+            ChatView(chat: chat).onAppear {
+                loadChat(chat: chat)
+            }
         }
     }
 
     private func filteredChats() -> [Chat] {
         let s = searchText.trimmingCharacters(in: .whitespaces).localizedLowercase
-        return s == "" && pendingConnections
+        return s == ""
             ? chatModel.chats
-            : s == ""
-            ? chatModel.chats.filter {
-                pendingConnections || $0.chatInfo.chatType != .contactConnection
-            }
-            : chatModel.chats.filter {
-                (pendingConnections || $0.chatInfo.chatType != .contactConnection) &&
-                $0.chatInfo.chatViewName.localizedLowercase.contains(s)
+            : chatModel.chats.filter { chat in
+                let contains = chat.chatInfo.chatViewName.localizedLowercase.contains(s)
+                switch chat.chatInfo {
+                case let .direct(contact):
+                    return contains
+                    || contact.profile.displayName.localizedLowercase.contains(s)
+                    || contact.fullName.localizedLowercase.contains(s)
+                case .contactConnection: return false
+                default: return contains
+                }
             }
     }
 }
@@ -108,11 +186,10 @@ struct ChatListView_Previews: PreviewProvider {
             )
 
         ]
-        @State var showChatInfo = false
         return Group {
-            ChatListView(showChatInfo: $showChatInfo)
+            ChatListView()
                 .environmentObject(chatModel)
-            ChatListView(showChatInfo: $showChatInfo)
+            ChatListView()
                 .environmentObject(ChatModel())
         }
     }
