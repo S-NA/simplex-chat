@@ -1,7 +1,7 @@
 {
   description = "nix flake for simplex-chat";
-  inputs.nixpkgs.url = "github:nixos/nixpkgs/nixpkgs-unstable"; #angerman/nixpkgs/patch-1"; # based on 21.11, still need this, until everything is merged into 21.11.
-  inputs.haskellNix.url = "github:input-output-hk/haskell.nix?ref=angerman/try-no-libcharset";
+  inputs.nixpkgs.url = "github:angerman/nixpkgs/patch-1"; # based on 21.11, still need this, until everything is merged into 21.11.
+  inputs.haskellNix.url = "github:input-output-hk/haskell.nix?ref=angerman/android-static";
   inputs.haskellNix.inputs.nixpkgs.follows = "nixpkgs";
   inputs.hackage = {
     url = "github:input-output-hk/hackage.nix";
@@ -26,7 +26,6 @@
         sha256map = import ./scripts/nix/sha256map.nix;
         modules = [{
           packages.direct-sqlcipher.patches = [ ./scripts/nix/direct-sqlcipher-2.3.27.patch ];
-          packages.entropy.patches = [ ./scripts/nix/entropy.patch ];
         }
         ({ pkgs,lib, ... }: lib.mkIf (pkgs.stdenv.hostPlatform.isAndroid) {
           packages.simplex-chat.components.library.ghcOptions = [ "-pie" ];
@@ -106,11 +105,13 @@
                 smallAddressSpace = true; enableShared = false;
                 setupBuildFlags = map (x: "--ghc-option=${x}") [ "-shared" "-o" "libsupport.so" ];
                 postInstall = ''
+
                   mkdir -p $out/_pkg
                   cp libsupport.so $out/_pkg
                   ${pkgs.patchelf}/bin/patchelf --remove-needed libunwind.so.1 $out/_pkg/libsupport.so
                   (cd $out/_pkg; ${pkgs.zip}/bin/zip -r -9 $out/pkg-aarch64-android-libsupport.zip *)
                   rm -fR $out/_pkg
+
                   mkdir -p $out/nix-support
                   echo "file binary-dist \"$(echo $out/*.zip)\"" \
                         > $out/nix-support/hydra-build-products
@@ -150,6 +151,7 @@
                   # find ${androidPkgs.stdenv.cc.libc}/lib -name "*.a" -exec cp {} $out/_pkg \;
                   echo ${androidPkgs.openssl}
                   find ${androidPkgs.openssl.out}/lib -name "*.so" -exec cp {} $out/_pkg \;
+
                   # remove the .1 and other version suffixes from .so's. Androids linker
                   # doesn't play nice with them.
                   for lib in $out/_pkg/*.so; do
@@ -161,11 +163,13 @@
                       fi
                     done
                   done
+
                   for lib in $out/_pkg/*.so; do
                     chmod +w "$lib"
                     ${pkgs.patchelf}/bin/patchelf --remove-needed libunwind.so "$lib"
                     [[ "$lib" != *libsimplex.so ]] && ${pkgs.patchelf}/bin/patchelf --set-soname "$(basename -a $lib)" "$lib"
                   done
+
                   ${pkgs.tree}/bin/tree $out/_pkg
                   (cd $out/_pkg; ${pkgs.zip}/bin/zip -r -9 $out/pkg-aarch64-android-libsimplex.zip *)
                   rm -fR $out/_pkg
@@ -178,11 +182,13 @@
                 smallAddressSpace = true; enableShared = false;
                 setupBuildFlags = map (x: "--ghc-option=${x}") [ "-shared" "-o" "libsupport.so" ];
                 postInstall = ''
+
                   mkdir -p $out/_pkg
                   cp libsupport.so $out/_pkg
                   ${pkgs.patchelf}/bin/patchelf --remove-needed libunwind.so.1 $out/_pkg/libsupport.so
                   (cd $out/_pkg; ${pkgs.zip}/bin/zip -r -9 $out/pkg-x86_64-android-libsupport.zip *)
                   rm -fR $out/_pkg
+
                   mkdir -p $out/nix-support
                   echo "file binary-dist \"$(echo $out/*.zip)\"" \
                         > $out/nix-support/hydra-build-products
@@ -213,7 +219,9 @@
                   # find ${androidPkgs.gmp6.override { withStatic = true; }}/lib -name "*.a" -exec cp {} $out/_pkg \;
                   # find ${androidIconv}/lib -name "*.a" -exec cp {} $out/_pkg \;
                   # find ${androidPkgs.stdenv.cc.libc}/lib -name "*.a" -exec cp {} $out/_pkg \;
+
                   ${pkgs.patchelf}/bin/patchelf --remove-needed libunwind.so.1 $out/_pkg/libsimplex.so
+
                   ${pkgs.tree}/bin/tree $out/_pkg
                   (cd $out/_pkg; ${pkgs.zip}/bin/zip -r -9 $out/pkg-x86_64-android-libsimplex.zip *)
                   rm -fR $out/_pkg
@@ -226,11 +234,13 @@
                 smallAddressSpace = true; enableShared = false;
                 setupBuildFlags = map (x: "--ghc-option=${x}") [ "-shared" "-o" "libsupport.so" ];
                 postInstall = ''
+
                   mkdir -p $out/_pkg
                   cp libsupport.so $out/_pkg
                   ${pkgs.patchelf}/bin/patchelf --remove-needed libunwind.so.1 $out/_pkg/libsupport.so
                   (cd $out/_pkg; ${pkgs.zip}/bin/zip -r -9 $out/pkg-x86_64-linux-libsupport.zip *)
                   rm -fR $out/_pkg
+
                   mkdir -p $out/nix-support
                   echo "file binary-dist \"$(echo $out/*.zip)\"" \
                         > $out/nix-support/hydra-build-products
@@ -261,7 +271,9 @@
                   # find ${androidPkgs.gmp6.override { withStatic = true; }}/lib -name "*.a" -exec cp {} $out/_pkg \;
                   # find ${androidIconv}/lib -name "*.a" -exec cp {} $out/_pkg \;
                   # find ${androidPkgs.stdenv.cc.libc}/lib -name "*.a" -exec cp {} $out/_pkg \;
+
                   ${pkgs.patchelf}/bin/patchelf --remove-needed libunwind.so.1 $out/_pkg/libsimplex.so
+
                   ${pkgs.tree}/bin/tree $out/_pkg
                   (cd $out/_pkg; ${pkgs.zip}/bin/zip -r -9 $out/pkg-x86_64-linux-libsimplex.zip *)
                   rm -fR $out/_pkg
