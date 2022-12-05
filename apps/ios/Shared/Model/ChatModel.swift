@@ -31,7 +31,8 @@ final class ChatModel: ObservableObject {
     // items in the terminal view
     @Published var terminalItems: [TerminalItem] = []
     @Published var userAddress: UserContactLink?
-    @Published var userSMPServers: [String]?
+    @Published var userSMPServers: [ServerCfg]?
+    @Published var presetSMPServers: [String]?
     @Published var chatItemTTL: ChatItemTTL = .none
     @Published var appOpenUrl: URL?
     @Published var deviceToken: DeviceToken?
@@ -51,6 +52,8 @@ final class ChatModel: ObservableObject {
     @Published var showCallView = false
     // currently showing QR code
     @Published var connReqInv: String?
+    // audio recording and playback
+    @Published var stopPreviousRecPlay: Bool = false // value is not taken into account, only the fact it switches
     var callWebView: WKWebView?
 
     var messageDelivery: Dictionary<Int64, () -> Void> = [:]
@@ -219,8 +222,10 @@ final class ChatModel: ObservableObject {
             withAnimation(.default) {
                 self.reversedChatItems[i] = cItem
                 self.reversedChatItems[i].viewTimestamp = .now
+                // on some occasions the confirmation of message being accepted by the server (tick)
+                // arrives earlier than the response from API, and item remains without tick
                 if case .sndNew = cItem.meta.itemStatus {
-                    self.reversedChatItems[i].meta = ci.meta
+                    self.reversedChatItems[i].meta.itemStatus = ci.meta.itemStatus
                 }
             }
             return false

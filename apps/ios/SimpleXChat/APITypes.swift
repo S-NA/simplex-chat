@@ -47,7 +47,8 @@ public enum ChatCommand {
     case apiDeleteGroupLink(groupId: Int64)
     case apiGetGroupLink(groupId: Int64)
     case getUserSMPServers
-    case setUserSMPServers(smpServers: [String])
+    case setUserSMPServers(smpServers: [ServerCfg])
+    case testSMPServer(smpServer: String)
     case apiSetChatItemTTL(seconds: Int64?)
     case apiGetChatItemTTL
     case apiSetNetworkConfig(networkConfig: NetCfg)
@@ -63,6 +64,7 @@ public enum ChatCommand {
     case apiClearChat(type: ChatType, id: Int64)
     case listContacts
     case apiUpdateProfile(profile: Profile)
+    case apiSetContactPrefs(contactId: Int64, preferences: Preferences)
     case apiSetContactAlias(contactId: Int64, localAlias: String)
     case apiSetConnectionAlias(connId: Int64, localAlias: String)
     case createMyAddress
@@ -124,8 +126,9 @@ public enum ChatCommand {
             case let .apiCreateGroupLink(groupId): return "/_create link #\(groupId)"
             case let .apiDeleteGroupLink(groupId): return "/_delete link #\(groupId)"
             case let .apiGetGroupLink(groupId): return "/_get link #\(groupId)"
-            case .getUserSMPServers: return "/smp_servers"
-            case let .setUserSMPServers(smpServers): return "/smp_servers \(smpServersStr(smpServers: smpServers))"
+            case .getUserSMPServers: return "/smp"
+            case let .setUserSMPServers(smpServers): return "/_smp \(smpServersStr(smpServers: smpServers))"
+            case let .testSMPServer(smpServer): return "/smp test \(smpServer)"
             case let .apiSetChatItemTTL(seconds): return "/_ttl \(chatItemTTLStr(seconds: seconds))"
             case .apiGetChatItemTTL: return "/ttl"
             case let .apiSetNetworkConfig(networkConfig): return "/_network \(encodeJSON(networkConfig))"
@@ -141,6 +144,7 @@ public enum ChatCommand {
             case let .apiClearChat(type, id): return "/_clear chat \(ref(type, id))"
             case .listContacts: return "/contacts"
             case let .apiUpdateProfile(profile): return "/_profile \(encodeJSON(profile))"
+            case let .apiSetContactPrefs(contactId, preferences): return "/_set prefs @\(contactId) \(encodeJSON(preferences))"
             case let .apiSetContactAlias(contactId, localAlias): return "/_set alias @\(contactId) \(localAlias.trimmingCharacters(in: .whitespaces))"
             case let .apiSetConnectionAlias(connId, localAlias): return "/_set alias :\(connId) \(localAlias.trimmingCharacters(in: .whitespaces))"
             case .createMyAddress: return "/address"
@@ -203,6 +207,7 @@ public enum ChatCommand {
             case .apiGetGroupLink: return "apiGetGroupLink"
             case .getUserSMPServers: return "getUserSMPServers"
             case .setUserSMPServers: return "setUserSMPServers"
+            case .testSMPServer: return "testSMPServer"
             case .apiSetChatItemTTL: return "apiSetChatItemTTL"
             case .apiGetChatItemTTL: return "apiGetChatItemTTL"
             case .apiSetNetworkConfig: return "apiSetNetworkConfig"
@@ -218,6 +223,7 @@ public enum ChatCommand {
             case .apiClearChat: return "apiClearChat"
             case .listContacts: return "listContacts"
             case .apiUpdateProfile: return "apiUpdateProfile"
+            case .apiSetContactPrefs: return "apiSetContactPrefs"
             case .apiSetContactAlias: return "apiSetContactAlias"
             case .apiSetConnectionAlias: return "apiSetConnectionAlias"
             case .createMyAddress: return "createMyAddress"
@@ -246,8 +252,8 @@ public enum ChatCommand {
         "\(type.rawValue)\(id)"
     }
 
-    func smpServersStr(smpServers: [String]) -> String {
-        smpServers.isEmpty ? "default" : smpServers.joined(separator: ";")
+    func smpServersStr(smpServers: [ServerCfg]) -> String {
+        smpServers.isEmpty ? "default" : encodeJSON(SMPServersConfig(smpServers: smpServers))
     }
 
     func chatItemTTLStr(seconds: Int64?) -> String {
@@ -288,7 +294,8 @@ public enum ChatResponse: Decodable, Error {
     case chatSuspended
     case apiChats(chats: [ChatData])
     case apiChat(chat: ChatData)
-    case userSMPServers(smpServers: [String])
+    case userSMPServers(smpServers: [ServerCfg], presetSMPServers: [String])
+    case smpTestResult(smpTestFailure: SMPTestFailure?)
     case chatItemTTL(chatItemTTL: Int64?)
     case networkConfig(networkConfig: NetCfg)
     case contactInfo(contact: Contact, connectionStats: ConnectionStats, customUserProfile: Profile?)
@@ -303,6 +310,7 @@ public enum ChatResponse: Decodable, Error {
     case userProfileUpdated(fromProfile: Profile, toProfile: Profile)
     case contactAliasUpdated(toContact: Contact)
     case connectionAliasUpdated(toConnection: PendingContactConnection)
+    case contactPrefsUpdated(fromContact: Contact, toContact: Contact)
     case userContactLink(contactLink: UserContactLink)
     case userContactLinkUpdated(contactLink: UserContactLink)
     case userContactLinkCreated(connReqContact: String)
@@ -324,7 +332,7 @@ public enum ChatResponse: Decodable, Error {
     case newChatItem(chatItem: AChatItem)
     case chatItemStatusUpdated(chatItem: AChatItem)
     case chatItemUpdated(chatItem: AChatItem)
-    case chatItemDeleted(deletedChatItem: AChatItem, toChatItem: AChatItem)
+    case chatItemDeleted(deletedChatItem: AChatItem, toChatItem: AChatItem?, byUser: Bool)
     case contactsList(contacts: [Contact])
     // group events
     case groupCreated(groupInfo: GroupInfo)
@@ -390,6 +398,7 @@ public enum ChatResponse: Decodable, Error {
             case .apiChats: return "apiChats"
             case .apiChat: return "apiChat"
             case .userSMPServers: return "userSMPServers"
+            case .smpTestResult: return "smpTestResult"
             case .chatItemTTL: return "chatItemTTL"
             case .networkConfig: return "networkConfig"
             case .contactInfo: return "contactInfo"
@@ -404,6 +413,7 @@ public enum ChatResponse: Decodable, Error {
             case .userProfileUpdated: return "userProfileUpdated"
             case .contactAliasUpdated: return "contactAliasUpdated"
             case .connectionAliasUpdated: return "connectionAliasUpdated"
+            case .contactPrefsUpdated: return "contactPrefsUpdated"
             case .userContactLink: return "userContactLink"
             case .userContactLinkUpdated: return "userContactLinkUpdated"
             case .userContactLinkCreated: return "userContactLinkCreated"
@@ -490,7 +500,8 @@ public enum ChatResponse: Decodable, Error {
             case .chatSuspended: return noDetails
             case let .apiChats(chats): return String(describing: chats)
             case let .apiChat(chat): return String(describing: chat)
-            case let .userSMPServers(smpServers): return String(describing: smpServers)
+            case let .userSMPServers(smpServers, presetServers): return "smpServers: \(String(describing: smpServers))\npresetServers: \(String(describing: presetServers))"
+            case let .smpTestResult(smpTestFailure): return String(describing: smpTestFailure)
             case let .chatItemTTL(chatItemTTL): return String(describing: chatItemTTL)
             case let .networkConfig(networkConfig): return String(describing: networkConfig)
             case let .contactInfo(contact, connectionStats, customUserProfile): return "contact: \(String(describing: contact))\nconnectionStats: \(String(describing: connectionStats))\ncustomUserProfile: \(String(describing: customUserProfile))"
@@ -505,6 +516,7 @@ public enum ChatResponse: Decodable, Error {
             case let .userProfileUpdated(_, toProfile): return String(describing: toProfile)
             case let .contactAliasUpdated(toContact): return String(describing: toContact)
             case let .connectionAliasUpdated(toConnection): return String(describing: toConnection)
+            case let .contactPrefsUpdated(fromContact, toContact): return "fromContact: \(String(describing: fromContact))\ntoContact: \(String(describing: toContact))"
             case let .userContactLink(contactLink): return contactLink.responseDetails
             case let .userContactLinkUpdated(contactLink): return contactLink.responseDetails
             case let .userContactLinkCreated(connReq): return connReq
@@ -526,7 +538,7 @@ public enum ChatResponse: Decodable, Error {
             case let .newChatItem(chatItem): return String(describing: chatItem)
             case let .chatItemStatusUpdated(chatItem): return String(describing: chatItem)
             case let .chatItemUpdated(chatItem): return String(describing: chatItem)
-            case let .chatItemDeleted(deletedChatItem, toChatItem): return "deletedChatItem:\n\(String(describing: deletedChatItem))\ntoChatItem:\n\(String(describing: toChatItem))"
+            case let .chatItemDeleted(deletedChatItem, toChatItem, byUser): return "deletedChatItem:\n\(String(describing: deletedChatItem))\ntoChatItem:\n\(String(describing: toChatItem))\nbyUser: \(byUser)"
             case let .contactsList(contacts): return String(describing: contacts)
             case let .groupCreated(groupInfo): return String(describing: groupInfo)
             case let .sentGroupInvitation(groupInfo, contact, member): return "groupInfo: \(groupInfo)\ncontact: \(contact)\nmember: \(member)"
@@ -613,7 +625,7 @@ public struct ArchiveConfig: Encodable {
     }
 }
 
-public struct DBEncryptionConfig: Encodable {
+public struct DBEncryptionConfig: Codable {
     public init(currentKey: String, newKey: String) {
         self.currentKey = currentKey
         self.newKey = newKey
@@ -621,6 +633,149 @@ public struct DBEncryptionConfig: Encodable {
 
     public var currentKey: String
     public var newKey: String
+}
+
+struct SMPServersConfig: Encodable {
+    var smpServers: [ServerCfg]
+}
+
+public struct ServerCfg: Identifiable, Equatable, Codable {
+    public var server: String
+    public var preset: Bool
+    public var tested: Bool?
+    public var enabled: Bool
+    var createdAt = Date()
+//    public var sendEnabled: Bool // can we potentially want to prevent sending on the servers we use to receive?
+// Even if we don't see the use case, it's probably better to allow it in the model
+// In any case, "trusted/known" servers are out of scope of this change
+
+    public init(server: String, preset: Bool, tested: Bool?, enabled: Bool) {
+        self.server = server
+        self.preset = preset
+        self.tested = tested
+        self.enabled = enabled
+    }
+
+    public static func == (l: ServerCfg, r: ServerCfg) -> Bool {
+        l.server == r.server && l.preset == r.preset && l.tested == r.tested && l.enabled == r.enabled
+    }
+
+    public var id: String { "\(server) \(createdAt)" }
+
+    public static var empty = ServerCfg(server: "", preset: false, tested: nil, enabled: true)
+
+    public var isEmpty: Bool {
+        server.trimmingCharacters(in: .whitespaces) == ""
+    }
+
+    public struct SampleData {
+        public var preset: ServerCfg
+        public var custom: ServerCfg
+        public var untested: ServerCfg
+    }
+
+    public static var sampleData = SampleData(
+        preset: ServerCfg(
+            server: "smp://abcd@smp8.simplex.im",
+            preset: true,
+            tested: true,
+            enabled: true
+        ),
+        custom: ServerCfg(
+            server: "smp://abcd@smp9.simplex.im",
+            preset: false,
+            tested: false,
+            enabled: false
+        ),
+        untested: ServerCfg(
+            server: "smp://abcd@smp10.simplex.im",
+            preset: false,
+            tested: nil,
+            enabled: true
+        )
+    )
+
+    enum CodingKeys: CodingKey {
+        case server
+        case preset
+        case tested
+        case enabled
+    }
+}
+
+public enum SMPTestStep: String, Decodable, Equatable {
+    case connect
+    case createQueue
+    case secureQueue
+    case deleteQueue
+    case disconnect
+
+    var text: String {
+        switch self {
+        case .connect: return NSLocalizedString("Connect", comment: "server test step")
+        case .createQueue: return NSLocalizedString("Create queue", comment: "server test step")
+        case .secureQueue: return NSLocalizedString("Secure queue", comment: "server test step")
+        case .deleteQueue: return NSLocalizedString("Delete queue", comment: "server test step")
+        case .disconnect: return NSLocalizedString("Disconnect", comment: "server test step")
+        }
+    }
+}
+
+public struct SMPTestFailure: Decodable, Error, Equatable {
+    var testStep: SMPTestStep
+    var testError: AgentErrorType
+
+    public static func == (l: SMPTestFailure, r: SMPTestFailure) -> Bool {
+        l.testStep == r.testStep
+    }
+
+    public var localizedDescription: String {
+        let err = String.localizedStringWithFormat(NSLocalizedString("Test failed at step %@.", comment: "server test failure"), testStep.text)
+        switch testError {
+        case .SMP(.AUTH):
+            return err + " " + NSLocalizedString("Server requires authorization to create queues, check password", comment: "server test error")
+        case .BROKER(_, .NETWORK):
+            return err + " " + NSLocalizedString("Possibly, certificate fingerprint in server address is incorrect", comment: "server test error")
+        default:
+            return err
+        }
+    }
+}
+
+public struct ServerAddress: Decodable {
+    public var hostnames: [String]
+    public var port: String
+    public var keyHash: String
+    public var basicAuth: String
+
+    public init(hostnames: [String], port: String, keyHash: String, basicAuth: String = "") {
+        self.hostnames = hostnames
+        self.port = port
+        self.keyHash = keyHash
+        self.basicAuth = basicAuth
+    }
+
+    public var uri: String {
+        "smp://\(keyHash)\(basicAuth == "" ? "" : ":" + basicAuth)@\(hostnames.joined(separator: ","))"
+    }
+
+    public var valid: Bool {
+        hostnames.count > 0 && Set(hostnames).count == hostnames.count
+    }
+
+    static public var empty = ServerAddress(
+        hostnames: [],
+        port: "",
+        keyHash: "",
+        basicAuth: ""
+    )
+
+    static public var sampleData = ServerAddress(
+        hostnames: ["smp.simplex.im", "1234.onion"],
+        port: "",
+        keyHash: "LcJUMfVhwD8yxjAiSaDzzGF3-kLG4Uh0Fl_ZIjrRwjI=",
+        basicAuth: "server_password"
+    )
 }
 
 public struct NetCfg: Codable, Equatable {
@@ -926,7 +1081,7 @@ public enum AgentErrorType: Decodable {
     case CONN(connErr: ConnectionErrorType)
     case SMP(smpErr: ProtocolErrorType)
     case NTF(ntfErr: ProtocolErrorType)
-    case BROKER(brokerErr: BrokerErrorType)
+    case BROKER(brokerAddress: String, brokerErr: BrokerErrorType)
     case AGENT(agentErr: SMPAgentError)
     case INTERNAL(internalErr: String)
 }

@@ -16,7 +16,7 @@ struct GroupLinkView: View {
 
     private enum GroupLinkAlert: Identifiable {
         case deleteLink
-        case error(title: LocalizedStringKey, error: String = "")
+        case error(title: LocalizedStringKey, error: LocalizedStringKey = "")
 
         var id: String {
             switch self {
@@ -29,10 +29,6 @@ struct GroupLinkView: View {
     var body: some View {
         ScrollView {
             VStack (alignment: .leading) {
-                Text("Group link")
-                    .font(.largeTitle)
-                    .bold()
-                    .padding(.bottom)
                 Text("You can share a link or a QR code - anybody will be able to join the group. You won't lose members of the group if you later delete it.")
                     .padding(.bottom)
                 if let groupLink = groupLink {
@@ -59,7 +55,7 @@ struct GroupLinkView: View {
                             } catch let error {
                                 logger.error("GroupLinkView apiCreateGroupLink: \(responseError(error))")
                                 let a = getErrorAlert(error, "Error creating group link")
-                                alert = .error(title: a.title, error: "\(a.message)")
+                                alert = .error(title: a.title, error: a.message)
                             }
                         }
                     } label: { Label("Create link", systemImage: "link.badge.plus") }
@@ -88,7 +84,7 @@ struct GroupLinkView: View {
                         }, secondaryButton: .cancel()
                     )
                 case let .error(title, error):
-                    return Alert(title: Text(title), message: Text("\(error)"))
+                    return Alert(title: Text(title), message: Text(error))
                 }
             }
         }

@@ -349,8 +349,8 @@ CREATE TABLE chat_items(
   created_by_msg_id INTEGER UNIQUE REFERENCES messages(message_id) ON DELETE SET NULL,
   item_sent INTEGER NOT NULL, -- 0 for received, 1 for sent
   item_ts TEXT NOT NULL, -- broker_ts of creating message for received, created_at for sent
-  item_deleted INTEGER NOT NULL DEFAULT 0, -- 1 for deleted, -- ! legacy field that was used for group chat items when they weren't fully deleted
-item_content TEXT NOT NULL, -- JSON
+  item_deleted INTEGER NOT NULL DEFAULT 0, -- 1 for deleted
+  item_content TEXT NOT NULL, -- JSON
   item_text TEXT NOT NULL, -- textual representation
   created_at TEXT NOT NULL DEFAULT(datetime('now')),
   updated_at TEXT NOT NULL DEFAULT(datetime('now'))
@@ -384,6 +384,10 @@ CREATE TABLE smp_servers(
   user_id INTEGER NOT NULL REFERENCES users ON DELETE CASCADE,
   created_at TEXT NOT NULL DEFAULT(datetime('now')),
   updated_at TEXT NOT NULL DEFAULT(datetime('now')),
+  basic_auth TEXT,
+  preset INTEGER DEFAULT 0 CHECK(preset NOT NULL),
+  tested INTEGER,
+  enabled INTEGER DEFAULT 1 CHECK(enabled NOT NULL),
   UNIQUE(host, port)
 );
 CREATE INDEX idx_messages_shared_msg_id ON messages(shared_msg_id);

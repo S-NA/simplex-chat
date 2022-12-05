@@ -15,7 +15,7 @@ struct CIMetaView: View {
 
     var body: some View {
         HStack(alignment: .center, spacing: 4) {
-            if !chatItem.isDeletedContent() {
+            if !chatItem.isDeletedContent {
                 if chatItem.meta.itemEdited {
                     statusImage("pencil", metaColor, 9)
                 }
@@ -50,7 +50,7 @@ struct CIMetaView: View {
 
 struct CIMetaView_Previews: PreviewProvider {
     static var previews: some View {
-        return Group {
+        Group {
             CIMetaView(chatItem: ChatItem.getSample(2, .directSnd, .now, "https://simplex.chat", .sndSent))
             CIMetaView(chatItem: ChatItem.getSample(2, .directSnd, .now, "https://simplex.chat", .sndSent, false, true))
             CIMetaView(chatItem: ChatItem.getDeletedContentSample())

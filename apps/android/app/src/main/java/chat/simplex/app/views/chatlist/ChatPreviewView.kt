@@ -26,7 +26,7 @@ import chat.simplex.app.views.chat.item.MarkdownText
 import chat.simplex.app.views.helpers.*
 
 @Composable
-fun ChatPreviewView(chat: Chat, chatModelIncognito: Boolean, currentUserProfileDisplayName: String?, stopped: Boolean) {
+fun ChatPreviewView(chat: Chat, chatModelIncognito: Boolean, currentUserProfileDisplayName: String?, stopped: Boolean, linkMode: SimplexLinkMode) {
   val cInfo = chat.chatInfo
 
   @Composable
@@ -83,9 +83,10 @@ fun ChatPreviewView(chat: Chat, chatModelIncognito: Boolean, currentUserProfileD
     val ci = chat.chatItems.lastOrNull()
     if (ci != null) {
       MarkdownText(
-        ci.text,
-        ci.formattedText,
+        if (!ci.meta.itemDeleted) ci.text else generalGetString(R.string.marked_deleted_description),
+        if (!ci.meta.itemDeleted) ci.formattedText else null,
         sender = if (cInfo is ChatInfo.Group && !ci.chatDir.sent) ci.memberDisplayName else null,
+        linkMode = linkMode,
         senderBold = true,
         metaText = null,
         maxLines = 2,
@@ -232,6 +233,6 @@ fun ChatStatusImage(chat: Chat) {
 @Composable
 fun PreviewChatPreviewView() {
   SimpleXTheme {
-    ChatPreviewView(Chat.sampleData, false, "", stopped = false)
+    ChatPreviewView(Chat.sampleData, false, "", stopped = false, linkMode = SimplexLinkMode.DESCRIPTION)
   }
 }

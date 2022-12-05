@@ -23,6 +23,7 @@ import Data.ByteString.Char8 (ByteString)
 import qualified Data.ByteString.Char8 as B
 import Data.Char (ord)
 import Data.Int (Int64)
+import Data.List.NonEmpty (NonEmpty)
 import Data.Map.Strict (Map)
 import Data.String
 import Data.Text (Text)
@@ -39,7 +40,7 @@ import Simplex.Chat.Protocol
 import Simplex.Chat.Store (AutoAccept, StoreError, UserContactLink)
 import Simplex.Chat.Types
 import Simplex.Messaging.Agent (AgentClient)
-import Simplex.Messaging.Agent.Client (AgentLocks)
+import Simplex.Messaging.Agent.Client (AgentLocks, SMPTestFailure)
 import Simplex.Messaging.Agent.Env.SQLite (AgentConfig, InitialAgentServers, NetworkConfig)
 import Simplex.Messaging.Agent.Lock
 import Simplex.Messaging.Agent.Protocol
@@ -80,16 +81,18 @@ data InlineFilesConfig = InlineFilesConfig
   { offerChunks :: Integer,
     sendChunks :: Integer,
     totalSendChunks :: Integer,
-    receiveChunks :: Integer
+    receiveChunks :: Integer,
+    receiveInstant :: Bool
   }
 
 defaultInlineFilesConfig :: InlineFilesConfig
 defaultInlineFilesConfig =
   InlineFilesConfig
     { offerChunks = 15, -- max when chunks are offered / received with the option - limited to 255 on the encoding level
-      sendChunks = 0, -- max per file when chunks will be sent inline without acceptance
+      sendChunks = 6, -- max per file when chunks will be sent inline without acceptance
       totalSendChunks = 30, -- max per conversation when chunks will be sent inline without acceptance
-      receiveChunks = 6 -- max when chunks are accepted
+      receiveChunks = 8, -- max when chunks are accepted
+      receiveInstant = True -- allow receiving instant files, within receiveChunks limit
     }
 
 data ActiveTo = ActiveNone | ActiveC ContactName | ActiveG GroupName
@@ -166,7 +169,7 @@ data ChatCommand
   | APIGetCallInvitations
   | APICallStatus ContactId WebRTCCallStatus
   | APIUpdateProfile Profile
-  | APISetContactPrefs Int64 Preferences
+  | APISetContactPrefs ContactId Preferences
   | APISetContactAlias ContactId LocalAlias
   | APISetConnectionAlias Int64 LocalAlias
   | APIParseMarkdown Text
@@ -186,7 +189,8 @@ data ChatCommand
   | APIDeleteGroupLink GroupId
   | APIGetGroupLink GroupId
   | GetUserSMPServers
-  | SetUserSMPServers [SMPServer]
+  | SetUserSMPServers SMPServersConfig
+  | TestSMPServer SMPServerWithAuth
   | APISetChatItemTTL (Maybe Int64)
   | APIGetChatItemTTL
   | APISetNetworkConfig NetworkConfig
@@ -235,7 +239,7 @@ data ChatCommand
   | DeleteGroupLink GroupName
   | ShowGroupLink GroupName
   | SendGroupMessageQuote {groupName :: GroupName, contactName_ :: Maybe ContactName, quotedMsg :: ByteString, message :: ByteString}
-  | LastMessages (Maybe ChatName) Int
+  | LastMessages (Maybe ChatName) Int (Maybe String)
   | SendFile ChatName FilePath
   | SendImage ChatName FilePath
   | ForwardFile ChatName FileTransferId
@@ -246,6 +250,9 @@ data ChatCommand
   | ShowProfile
   | UpdateProfile ContactName Text
   | UpdateProfileImage (Maybe ImageData)
+  | SetUserFeature ChatFeature FeatureAllowed
+  | SetContactFeature ChatFeature ContactName (Maybe FeatureAllowed)
+  | SetGroupFeature GroupFeature GroupName GroupFeatureEnabled
   | QuitChat
   | ShowVersion
   | DebugLocks
@@ -261,7 +268,8 @@ data ChatResponse
   | CRApiChat {chat :: AChat}
   | CRLastMessages {chatItems :: [AChatItem]}
   | CRApiParsedMarkdown {formattedText :: Maybe MarkdownList}
-  | CRUserSMPServers {smpServers :: [SMPServer]}
+  | CRUserSMPServers {smpServers :: NonEmpty ServerCfg, presetSMPServers :: NonEmpty SMPServerWithAuth}
+  | CRSmpTestResult {smpTestFailure :: Maybe SMPTestFailure}
   | CRChatItemTTL {chatItemTTL :: Maybe Int64}
   | CRNetworkConfig {networkConfig :: NetworkConfig}
   | CRContactInfo {contact :: Contact, connectionStats :: ConnectionStats, customUserProfile :: Maybe Profile}
@@ -271,7 +279,7 @@ data ChatResponse
   | CRNewChatItem {chatItem :: AChatItem}
   | CRChatItemStatusUpdated {chatItem :: AChatItem}
   | CRChatItemUpdated {chatItem :: AChatItem}
-  | CRChatItemDeleted {deletedChatItem :: AChatItem, toChatItem :: AChatItem}
+  | CRChatItemDeleted {deletedChatItem :: AChatItem, toChatItem :: Maybe AChatItem, byUser :: Bool}
   | CRChatItemDeletedNotFound {contact :: Contact, sharedMsgId :: SharedMsgId}
   | CRBroadcastSent MsgContent Int ZonedTime
   | CRMsgIntegrityError {msgError :: MsgErrorType}
@@ -296,7 +304,7 @@ data ChatResponse
   | CRInvitation {connReqInvitation :: ConnReqInvitation}
   | CRSentConfirmation
   | CRSentInvitation {customUserProfile :: Maybe Profile}
-  | CRContactUpdated {fromContact :: Contact, toContact :: Contact, preferences :: ContactUserPreferences}
+  | CRContactUpdated {fromContact :: Contact, toContact :: Contact}
   | CRContactsMerged {intoContact :: Contact, mergedContact :: Contact}
   | CRContactDeleted {contact :: Contact}
   | CRChatCleared {chatInfo :: AChatInfo}
@@ -322,7 +330,7 @@ data ChatResponse
   | CRUserProfileUpdated {fromProfile :: Profile, toProfile :: Profile}
   | CRContactAliasUpdated {toContact :: Contact}
   | CRConnectionAliasUpdated {toConnection :: PendingContactConnection}
-  | CRContactPrefsUpdated {fromContact :: Contact, toContact :: Contact, preferences :: ContactUserPreferences}
+  | CRContactPrefsUpdated {fromContact :: Contact, toContact :: Contact}
   | CRContactConnecting {contact :: Contact}
   | CRContactConnected {contact :: Contact, userCustomProfile :: Maybe Profile}
   | CRContactAnotherClient {contact :: Contact}
@@ -382,6 +390,9 @@ data ChatResponse
 instance ToJSON ChatResponse where
   toJSON = J.genericToJSON . sumTypeJSON $ dropPrefix "CR"
   toEncoding = J.genericToEncoding . sumTypeJSON $ dropPrefix "CR"
+
+data SMPServersConfig = SMPServersConfig {smpServers :: [ServerCfg]}
+  deriving (Show, Generic, FromJSON)
 
 data ArchiveConfig = ArchiveConfig {archivePath :: FilePath, disableCompression :: Maybe Bool, parentTempDirectory :: Maybe FilePath}
   deriving (Show, Generic, FromJSON)
@@ -465,6 +476,24 @@ data SwitchProgress = SwitchProgress
 
 instance ToJSON SwitchProgress where toEncoding = J.genericToEncoding J.defaultOptions
 
+data ParsedServerAddress = ParsedServerAddress
+  { serverAddress :: Maybe ServerAddress,
+    parseError :: String
+  }
+  deriving (Show, Generic)
+
+instance ToJSON ParsedServerAddress where toEncoding = J.genericToEncoding J.defaultOptions
+
+data ServerAddress = ServerAddress
+  { hostnames :: NonEmpty String,
+    port :: String,
+    keyHash :: String,
+    basicAuth :: String
+  }
+  deriving (Show, Generic)
+
+instance ToJSON ServerAddress where toEncoding = J.genericToEncoding J.defaultOptions
+
 data ChatError
   = ChatError {errorType :: ChatErrorType}
   | ChatErrorAgent {agentError :: AgentErrorType}
@@ -510,6 +539,7 @@ data ChatErrorType
   | CEFileImageType {filePath :: FilePath}
   | CEFileImageSize {filePath :: FilePath}
   | CEFileNotReceived {fileId :: FileTransferId}
+  | CEInlineFileProhibited {fileId :: FileTransferId}
   | CEInvalidQuote
   | CEInvalidChatItemUpdate
   | CEInvalidChatItemDelete
@@ -517,6 +547,7 @@ data ChatErrorType
   | CENoCurrentCall
   | CECallContact {contactId :: Int64}
   | CECallState {currentCallState :: CallStateTag}
+  | CEDirectMessagesProhibited {direction :: MsgDirection, contact :: Contact}
   | CEAgentVersion
   | CEAgentNoSubResult {agentConnId :: AgentConnId}
   | CECommandError {message :: String}

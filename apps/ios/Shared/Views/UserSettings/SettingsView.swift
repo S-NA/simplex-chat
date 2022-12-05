@@ -19,10 +19,13 @@ let appBuild = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion")  as? 
 let DEFAULT_SHOW_LA_NOTICE = "showLocalAuthenticationNotice"
 let DEFAULT_LA_NOTICE_SHOWN = "localAuthenticationNoticeShown"
 let DEFAULT_PERFORM_LA = "performLocalAuthentication"
+let DEFAULT_NOTIFICATION_ALERT_SHOWN = "notificationAlertShown"
 let DEFAULT_WEBRTC_POLICY_RELAY = "webrtcPolicyRelay"
 let DEFAULT_WEBRTC_ICE_SERVERS = "webrtcICEServers"
 let DEFAULT_PRIVACY_ACCEPT_IMAGES = "privacyAcceptImages"
 let DEFAULT_PRIVACY_LINK_PREVIEWS = "privacyLinkPreviews"
+let DEFAULT_PRIVACY_SIMPLEX_LINK_MODE = "privacySimplexLinkMode"
+let DEFAULT_PRIVACY_PROTECT_SCREEN = "privacyProtectScreen"
 let DEFAULT_EXPERIMENTAL_CALLS = "experimentalCalls"
 let DEFAULT_CHAT_ARCHIVE_NAME = "chatArchiveName"
 let DEFAULT_CHAT_ARCHIVE_TIME = "chatArchiveTime"
@@ -40,9 +43,12 @@ let appDefaults: [String: Any] = [
     DEFAULT_SHOW_LA_NOTICE: false,
     DEFAULT_LA_NOTICE_SHOWN: false,
     DEFAULT_PERFORM_LA: false,
+    DEFAULT_NOTIFICATION_ALERT_SHOWN: false,
     DEFAULT_WEBRTC_POLICY_RELAY: true,
     DEFAULT_PRIVACY_ACCEPT_IMAGES: true,
     DEFAULT_PRIVACY_LINK_PREVIEWS: true,
+    DEFAULT_PRIVACY_SIMPLEX_LINK_MODE: "description",
+    DEFAULT_PRIVACY_PROTECT_SCREEN: true,
     DEFAULT_EXPERIMENTAL_CALLS: false,
     DEFAULT_CHAT_V3_DB_MIGRATION: "offer",
     DEFAULT_DEVELOPER_TOOLS: false,
@@ -54,6 +60,24 @@ let appDefaults: [String: Any] = [
     DEFAULT_CONNECT_VIA_LINK_TAB: "scan"
 ]
 
+enum SimpleXLinkMode: String, Identifiable {
+    case description
+    case full
+    case browser
+
+    static var values: [SimpleXLinkMode] = [.description, .full, .browser]
+
+    public var id: Self { self }
+
+    var text: LocalizedStringKey {
+        switch self {
+        case .description: return "Description"
+        case .full: return "Full link"
+        case .browser: return "Via browser"
+        }
+    }
+}
+
 private var indent: CGFloat = 36
 
 let chatArchiveTimeDefault = DateDefault(defaults: UserDefaults.standard, forKey: DEFAULT_CHAT_ARCHIVE_TIME)
@@ -63,6 +87,8 @@ let encryptionStartedDefault = BoolDefault(defaults: UserDefaults.standard, forK
 let encryptionStartedAtDefault = DateDefault(defaults: UserDefaults.standard, forKey: DEFAULT_ENCRYPTION_STARTED_AT)
 
 let connectViaLinkTabDefault = EnumDefault<ConnectViaLinkTab>(defaults: UserDefaults.standard, forKey: DEFAULT_CONNECT_VIA_LINK_TAB, withDefault: .scan)
+
+let privacySimplexLinkModeDefault = EnumDefault<SimpleXLinkMode>(defaults: UserDefaults.standard, forKey: DEFAULT_PRIVACY_SIMPLEX_LINK_MODE, withDefault: .description)
 
 func setGroupDefaults() {
     privacyAcceptImagesGroupDefault.set(UserDefaults.standard.bool(forKey: DEFAULT_PRIVACY_ACCEPT_IMAGES))
@@ -89,10 +115,8 @@ struct SettingsView: View {
                         ProfilePreview(profileOf: user)
                         .padding(.leading, -8)
                     }
-                    .disabled(chatModel.chatRunning != true)
 
                     incognitoRow()
-                        .disabled(chatModel.chatRunning != true)
 
                     NavigationLink {
                         CreateLinkView(selection: .longTerm, viaNavLink: true)
@@ -100,24 +124,15 @@ struct SettingsView: View {
                     } label: {
                         settingsRow("qrcode") { Text("Your SimpleX contact address") }
                     }
-                    .disabled(chatModel.chatRunning != true)
 
                     NavigationLink {
-                        DatabaseView(showSettings: $showSettings, chatItemTTL: chatModel.chatItemTTL)
-                            .navigationTitle("Your chat database")
+                        PreferencesView(profile: user.profile, preferences: user.fullPreferences, currentPreferences: user.fullPreferences)
+                            .navigationTitle("Your preferences")
                     } label: {
-                        let color: Color = chatModel.chatDbEncrypted == false ? .orange : .secondary
-                        settingsRow("internaldrive", color: color) {
-                            HStack {
-                                Text("Database passphrase & export")
-                                Spacer()
-                                if chatModel.chatRunning == false {
-                                    Image(systemName: "exclamationmark.octagon.fill").foregroundColor(.red)
-                                }
-                            }
-                        }
+                        settingsRow("switch.2") { Text("Chat preferences") }
                     }
                 }
+                .disabled(chatModel.chatRunning != true)
                 
                 Section("Settings") {
                     NavigationLink {
@@ -129,18 +144,32 @@ struct SettingsView: View {
                             Text("Notifications")
                         }
                     }
+                    .disabled(chatModel.chatRunning != true)
+                    
+                    NavigationLink {
+                        NetworkAndServers()
+                            .navigationTitle("Network & servers")
+                    } label: {
+                        settingsRow("externaldrive.connected.to.line.below") { Text("Network & servers") }
+                    }
+                    .disabled(chatModel.chatRunning != true)
+                    
                     NavigationLink {
                         CallSettings()
                             .navigationTitle("Your calls")
                     } label: {
                         settingsRow("video") { Text("Audio & video calls") }
                     }
+                    .disabled(chatModel.chatRunning != true)
+                    
                     NavigationLink {
                         PrivacySettings()
                             .navigationTitle("Your privacy")
                     } label: {
                         settingsRow("lock") { Text("Privacy & security") }
                     }
+                    .disabled(chatModel.chatRunning != true)
+                    
                     if UIApplication.shared.supportsAlternateIcons {
                         NavigationLink {
                             AppearanceSettings()
@@ -148,15 +177,11 @@ struct SettingsView: View {
                         } label: {
                             settingsRow("sun.max") { Text("Appearance") }
                         }
+                        .disabled(chatModel.chatRunning != true)
                     }
-                    NavigationLink {
-                        NetworkAndServers()
-                            .navigationTitle("Network & servers")
-                    } label: {
-                        settingsRow("externaldrive.connected.to.line.below") { Text("Network & servers") }
-                    }
+                    
+                    chatDatabaseRow()
                 }
-                .disabled(chatModel.chatRunning != true)
 
                 Section("Help") {
                     NavigationLink {
@@ -274,6 +299,24 @@ struct SettingsView: View {
                 }
             }
             .padding(.leading, indent)
+        }
+    }
+    
+    private func chatDatabaseRow() -> some View {
+        NavigationLink {
+            DatabaseView(showSettings: $showSettings, chatItemTTL: chatModel.chatItemTTL)
+                .navigationTitle("Your chat database")
+        } label: {
+            let color: Color = chatModel.chatDbEncrypted == false ? .orange : .secondary
+            settingsRow("internaldrive", color: color) {
+                HStack {
+                    Text("Database passphrase & export")
+                    Spacer()
+                    if chatModel.chatRunning == false {
+                        Image(systemName: "exclamationmark.octagon.fill").foregroundColor(.red)
+                    }
+                }
+            }
         }
     }
 
