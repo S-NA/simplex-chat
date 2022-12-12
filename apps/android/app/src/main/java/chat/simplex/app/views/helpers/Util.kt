@@ -29,7 +29,10 @@ import androidx.core.content.FileProvider
 import androidx.core.text.HtmlCompat
 import chat.simplex.app.*
 import chat.simplex.app.model.CIFile
+import chat.simplex.app.model.json
 import kotlinx.coroutines.*
+import kotlinx.serialization.decodeFromString
+import kotlinx.serialization.encodeToString
 import java.io.*
 import java.text.SimpleDateFormat
 import java.util.*
@@ -225,7 +228,7 @@ const val MAX_IMAGE_SIZE_AUTO_RCV: Long = MAX_IMAGE_SIZE * 2
 const val MAX_VOICE_SIZE_AUTO_RCV: Long = MAX_IMAGE_SIZE
 
 const val MAX_VOICE_SIZE_FOR_SENDING: Long = 94680 // 6 chunks * 15780 bytes per chunk
-const val MAX_VOICE_MILLIS_FOR_SENDING: Long = 43_000 // approximately is ok
+const val MAX_VOICE_MILLIS_FOR_SENDING: Int = 43_000
 
 const val MAX_FILE_SIZE: Long = 8000000
 
@@ -462,3 +465,9 @@ val LongRange.Companion.saver
     save = { it.value.first to it.value.last },
     restore = { mutableStateOf(it.first..it.second) }
     )
+
+/* Make sure that T class has @Serializable annotation */
+inline fun <reified T> serializableSaver(): Saver<T, *> = Saver(
+    save = { json.encodeToString(it) },
+    restore = { json.decodeFromString(it) }
+  )

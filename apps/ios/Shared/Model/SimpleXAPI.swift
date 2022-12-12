@@ -356,14 +356,14 @@ func apiSetChatSettings(type: ChatType, id: Int64, chatSettings: ChatSettings) a
     try await sendCommandOkResp(.apiSetChatSettings(type: type, id: id, chatSettings: chatSettings))
 }
 
-func apiContactInfo(contactId: Int64) async throws -> (ConnectionStats?, Profile?) {
+func apiContactInfo(_ contactId: Int64) async throws -> (ConnectionStats?, Profile?) {
     let r = await chatSendCmd(.apiContactInfo(contactId: contactId))
     if case let .contactInfo(_, connStats, customUserProfile) = r { return (connStats, customUserProfile) }
     throw r
 }
 
-func apiGroupMemberInfo(_ groupId: Int64, _ groupMemberId: Int64) async throws -> (ConnectionStats?) {
-    let r = await chatSendCmd(.apiGroupMemberInfo(groupId: groupId, groupMemberId: groupMemberId))
+func apiGroupMemberInfo(_ groupId: Int64, _ groupMemberId: Int64) throws -> (ConnectionStats?) {
+    let r = chatSendCmdSync(.apiGroupMemberInfo(groupId: groupId, groupMemberId: groupMemberId))
     if case let .groupMemberInfo(_, _, connStats_) = r { return (connStats_) }
     throw r
 }
@@ -374,6 +374,32 @@ func apiSwitchContact(contactId: Int64) async throws {
 
 func apiSwitchGroupMember(_ groupId: Int64, _ groupMemberId: Int64) async throws {
     try await sendCommandOkResp(.apiSwitchGroupMember(groupId: groupId, groupMemberId: groupMemberId))
+}
+
+func apiGetContactCode(_ contactId: Int64) async throws -> (Contact, String) {
+    let r = await chatSendCmd(.apiGetContactCode(contactId: contactId))
+    if case let .contactCode(contact, connectionCode) = r { return (contact, connectionCode) }
+    throw r
+}
+
+func apiGetGroupMemberCode(_ groupId: Int64, _ groupMemberId: Int64) throws -> (GroupMember, String) {
+    let r = chatSendCmdSync(.apiGetGroupMemberCode(groupId: groupId, groupMemberId: groupMemberId))
+    if case let .groupMemberCode(_, member, connectionCode) = r { return (member, connectionCode) }
+    throw r
+}
+
+func apiVerifyContact(_ contactId: Int64, connectionCode: String?) -> (Bool, String)? {
+    let r = chatSendCmdSync(.apiVerifyContact(contactId: contactId, connectionCode: connectionCode))
+    if case let .connectionVerified(verified, expectedCode) = r { return (verified, expectedCode) }
+    logger.error("apiVerifyContact error: \(String(describing: r))")
+    return nil
+}
+
+func apiVerifyGroupMember(_ groupId: Int64, _ groupMemberId: Int64, connectionCode: String?) -> (Bool, String)? {
+    let r = chatSendCmdSync(.apiVerifyGroupMember(groupId: groupId, groupMemberId: groupMemberId, connectionCode: connectionCode))
+    if case let .connectionVerified(verified, expectedCode) = r { return (verified, expectedCode) }
+    logger.error("apiVerifyGroupMember error: \(String(describing: r))")
+    return nil
 }
 
 func apiAddContact() async -> String? {
@@ -782,6 +808,12 @@ func apiListMembers(_ groupId: Int64) async -> [GroupMember] {
     return []
 }
 
+func apiListMembersSync(_ groupId: Int64) -> [GroupMember] {
+    let r = chatSendCmdSync(.apiListMembers(groupId: groupId))
+    if case let .groupMembers(group) = r { return group.members }
+    return []
+}
+
 func filterMembersToAdd(_ ms: [GroupMember]) -> [Contact] {
     let memberContactIds = ms.compactMap{ m in m.memberCurrent ? m.memberContactId : nil }
     return ChatModel.shared.chats
@@ -917,7 +949,7 @@ func processReceivedMsg(_ res: ChatResponse) async {
         case let .contactConnectionDeleted(connection):
             m.removeChat(connection.id)
         case let .contactConnected(contact, _):
-            if !contact.viaGroupLink {
+            if contact.directContact {
                 m.updateContact(contact)
                 m.dismissConnReqView(contact.activeConn.id)
                 m.removeChat(contact.activeConn.id)
@@ -925,7 +957,7 @@ func processReceivedMsg(_ res: ChatResponse) async {
                 NtfManager.shared.notifyContactConnected(contact)
             }
         case let .contactConnecting(contact):
-            if !contact.viaGroupLink {
+            if contact.directContact {
                 m.updateContact(contact)
                 m.dismissConnReqView(contact.activeConn.id)
                 m.removeChat(contact.activeConn.id)
@@ -972,20 +1004,15 @@ func processReceivedMsg(_ res: ChatResponse) async {
             let cInfo = aChatItem.chatInfo
             let cItem = aChatItem.chatItem
             m.addChatItem(cInfo, cItem)
-            if case .image = cItem.content.msgContent,
-               let file = cItem.file,
-               file.fileSize <= MAX_IMAGE_SIZE,
-               UserDefaults.standard.bool(forKey: DEFAULT_PRIVACY_ACCEPT_IMAGES) {
-                Task {
-                    await receiveFile(fileId: file.fileId)
-                }
-            } else if case .voice = cItem.content.msgContent, // TODO check inlineFileMode != IFMSent
-               let file = cItem.file,
-               file.fileSize <= MAX_IMAGE_SIZE,
-               file.fileSize > MAX_VOICE_MESSAGE_SIZE_INLINE_SEND,
-               UserDefaults.standard.bool(forKey: DEFAULT_PRIVACY_ACCEPT_IMAGES) {
-                Task {
-                    await receiveFile(fileId: file.fileId)
+            if let file = cItem.file,
+               let mc = cItem.content.msgContent,
+               file.fileSize <= MAX_IMAGE_SIZE {
+                let acceptImages = UserDefaults.standard.bool(forKey: DEFAULT_PRIVACY_ACCEPT_IMAGES)
+                if (mc.isImage && acceptImages)
+                    || (mc.isVoice && ((file.fileSize > MAX_VOICE_MESSAGE_SIZE_INLINE_SEND && acceptImages) || cInfo.chatType == .group)) {
+                    Task {
+                        await receiveFile(fileId: file.fileId) // TODO check inlineFileMode != IFMSent
+                    }
                 }
             }
             if cItem.showNotification {

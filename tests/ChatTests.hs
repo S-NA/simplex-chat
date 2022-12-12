@@ -24,7 +24,10 @@ import qualified Data.Text as T
 import Simplex.Chat.Call
 import Simplex.Chat.Controller (ChatConfig (..), ChatController (..), InlineFilesConfig (..), defaultInlineFilesConfig)
 import Simplex.Chat.Options (ChatOpts (..))
+import Simplex.Chat.Store (getUserContactProfiles)
 import Simplex.Chat.Types
+import Simplex.Messaging.Agent.Store.SQLite (withTransaction)
+import qualified Simplex.Messaging.Crypto as C
 import Simplex.Messaging.Encoding.String
 import Simplex.Messaging.Util (unlessM)
 import System.Directory (copyFile, createDirectoryIfMissing, doesDirectoryExist, doesFileExist)
@@ -50,6 +53,7 @@ chatTests :: Spec
 chatTests = do
   describe "direct messages" $ do
     describe "add contact and send/receive message" testAddContact
+    it "deleting contact deletes profile" testDeleteContactDeletesProfile
     it "direct message quoted replies" testDirectMessageQuotedReply
     it "direct message update" testDirectMessageUpdate
     it "direct message delete" testDirectMessageDelete
@@ -71,6 +75,8 @@ chatTests = do
     it "group message delete" testGroupMessageDelete
     it "update group profile" testUpdateGroupProfile
     it "update member role" testUpdateMemberRole
+    it "unused contacts are deleted after all their groups are deleted" testGroupDeleteUnusedContacts
+    it "group description is shown as the first message to new members" testGroupDescription
   describe "async group connections" $ do
     xit "create and join group when clients go offline" testGroupAsync
   describe "user profiles" $ do
@@ -116,6 +122,15 @@ chatTests = do
     it "join group incognito" testJoinGroupIncognito
     it "can't invite contact to whom user connected incognito to a group" testCantInviteContactIncognito
     it "can't see global preferences update" testCantSeeGlobalPrefsUpdateIncognito
+    it "deleting contact first, group second deletes incognito profile" testDeleteContactThenGroupDeletesIncognitoProfile
+    it "deleting group first, contact second deletes incognito profile" testDeleteGroupThenContactDeletesIncognitoProfile
+  describe "group links" $ do
+    it "create group link, join via group link" testGroupLink
+    it "delete group, re-join via same link" testGroupLinkDeleteGroupRejoin
+    it "sending message to contact created via group link marks it used" testGroupLinkContactUsed
+    it "create group link, join via group link - incognito membership" testGroupLinkIncognitoMembership
+    it "unused host contact is deleted after all groups with it are deleted" testGroupLinkUnusedHostContactDeleted
+    it "leaving groups with unused host contacts deletes incognito profiles" testGroupLinkIncognitoUnusedHostContactsDeleted
   describe "contact aliases" $ do
     it "set contact alias" testSetAlias
     it "set connection alias" testSetConnectionAlias
@@ -152,14 +167,16 @@ chatTests = do
     it "mute/unmute group" testMuteGroup
   describe "chat item expiration" $ do
     it "set chat item TTL" testSetChatItemTTL
-  describe "group links" $ do
-    it "create group link, join via group link" testGroupLink
-    it "delete group, re-join via same link" testGroupLinkDeleteGroupRejoin
-    it "sending message to contact created via group link marks it used" testGroupLinkContactUsed
-    it "create group link, join via group link - incognito membership" testGroupLinkIncognitoMembership
   describe "queue rotation" $ do
     it "switch contact to a different queue" testSwitchContact
     it "switch group member to a different queue" testSwitchGroupMember
+  describe "connection verification code" $ do
+    it "verificationCode function converts ByteString to series of digits" $
+      verificationCode (C.sha256Hash "abcd") `shouldBe` "61889 38426 63934 09576 96390 79389 84124 85253 63658 69469 70853 37788 95900 68296 20156 25"
+    it "sameVerificationCode function should ignore spaces" $
+      sameVerificationCode "123 456 789" "12345 6789" `shouldBe` True
+    it "mark contact verified" testMarkContactVerified
+    it "mark group member verified" testMarkGroupMemberVerified
 
 versionTestMatrix2 :: (TestCC -> TestCC -> IO ()) -> Spec
 versionTestMatrix2 runTest = do
@@ -260,7 +277,9 @@ testAddContact = versionTestMatrix2 runTestAddContact
       alice ##> "@bob_1 hey"
       alice <## "no contact bob_1"
       alice @@@ [("@bob", "how are you?")]
+      alice `hasContactProfiles` ["alice", "bob"]
       bob @@@ [("@alice_1", "hi"), ("@alice", "how are you?")]
+      bob `hasContactProfiles` ["alice", "alice", "bob"]
       -- test clearing chat
       alice #$> ("/clear bob", id, "bob: all messages are removed locally ONLY")
       alice #$> ("/_get chat @2 count=100", chat, [])
@@ -291,6 +310,25 @@ testAddContact = versionTestMatrix2 runTestAddContact
       bob #$> ("/_read chat @2 from=1 to=100", id, "ok")
       alice #$> ("/_read chat @2", id, "ok")
       bob #$> ("/_read chat @2", id, "ok")
+
+testDeleteContactDeletesProfile :: IO ()
+testDeleteContactDeletesProfile =
+  testChat2 aliceProfile bobProfile $
+    \alice bob -> do
+      connectUsers alice bob
+      alice <##> bob
+      -- alice deletes contact, profile is deleted
+      alice ##> "/d bob"
+      alice <## "bob: contact is deleted"
+      alice ##> "/cs"
+      (alice </)
+      alice `hasContactProfiles` ["alice"]
+      -- bob deletes contact, profile is deleted
+      bob ##> "/d alice"
+      bob <## "alice: contact is deleted"
+      bob ##> "/cs"
+      (bob </)
+      bob `hasContactProfiles` ["bob"]
 
 testDirectMessageQuotedReply :: IO ()
 testDirectMessageQuotedReply =
@@ -461,7 +499,7 @@ testGroupShared alice bob cath checkMessages = do
   connectUsers alice cath
   alice ##> "/g team"
   alice <## "group #team is created"
-  alice <## "use /a team <name> to add members"
+  alice <## "to add members use /a team <name> or /create link #team"
   alice ##> "/a team bob"
   concurrentlyN_
     [ alice <## "invitation to join the group #team sent to bob",
@@ -596,7 +634,7 @@ testGroup2 =
       connectUsers alice dan
       alice ##> "/g club"
       alice <## "group #club is created"
-      alice <## "use /a club <name> to add members"
+      alice <## "to add members use /a club <name> or /create link #club"
       alice ##> "/a club bob"
       concurrentlyN_
         [ alice <## "invitation to join the group #club sent to bob",
@@ -814,10 +852,10 @@ testGroupSameName =
     \alice _ -> do
       alice ##> "/g team"
       alice <## "group #team is created"
-      alice <## "use /a team <name> to add members"
+      alice <## "to add members use /a team <name> or /create link #team"
       alice ##> "/g team"
       alice <## "group #team_1 (team) is created"
-      alice <## "use /a team_1 <name> to add members"
+      alice <## "to add members use /a team_1 <name> or /create link #team_1"
 
 testGroupDeleteWhenInvited :: IO ()
 testGroupDeleteWhenInvited =
@@ -826,7 +864,7 @@ testGroupDeleteWhenInvited =
       connectUsers alice bob
       alice ##> "/g team"
       alice <## "group #team is created"
-      alice <## "use /a team <name> to add members"
+      alice <## "to add members use /a team <name> or /create link #team"
       alice ##> "/a team bob"
       concurrentlyN_
         [ alice <## "invitation to join the group #team sent to bob",
@@ -853,7 +891,7 @@ testGroupReAddInvited =
       connectUsers alice bob
       alice ##> "/g team"
       alice <## "group #team is created"
-      alice <## "use /a team <name> to add members"
+      alice <## "to add members use /a team <name> or /create link #team"
       alice ##> "/a team bob"
       concurrentlyN_
         [ alice <## "invitation to join the group #team sent to bob",
@@ -888,7 +926,7 @@ testGroupReAddInvitedChangeRole =
       connectUsers alice bob
       alice ##> "/g team"
       alice <## "group #team is created"
-      alice <## "use /a team <name> to add members"
+      alice <## "to add members use /a team <name> or /create link #team"
       alice ##> "/a team bob"
       concurrentlyN_
         [ alice <## "invitation to join the group #team sent to bob",
@@ -928,7 +966,7 @@ testGroupDeleteInvitedContact =
       connectUsers alice bob
       alice ##> "/g team"
       alice <## "group #team is created"
-      alice <## "use /a team <name> to add members"
+      alice <## "to add members use /a team <name> or /create link #team"
       alice ##> "/a team bob"
       concurrentlyN_
         [ alice <## "invitation to join the group #team sent to bob",
@@ -959,7 +997,7 @@ testDeleteGroupMemberProfileKept =
       -- group 1
       alice ##> "/g team"
       alice <## "group #team is created"
-      alice <## "use /a team <name> to add members"
+      alice <## "to add members use /a team <name> or /create link #team"
       alice ##> "/a team bob"
       concurrentlyN_
         [ alice <## "invitation to join the group #team sent to bob",
@@ -978,7 +1016,7 @@ testDeleteGroupMemberProfileKept =
       -- group 2
       alice ##> "/g club"
       alice <## "group #club is created"
-      alice <## "use /a club <name> to add members"
+      alice <## "to add members use /a club <name> or /create link #club"
       alice ##> "/a club bob"
       concurrentlyN_
         [ alice <## "invitation to join the group #club sent to bob",
@@ -1071,7 +1109,7 @@ testGroupList =
       createGroup2 "team" alice bob
       alice ##> "/g tennis"
       alice <## "group #tennis is created"
-      alice <## "use /a tennis <name> to add members"
+      alice <## "to add members use /a tennis <name> or /create link #tennis"
       alice ##> "/a tennis bob"
       concurrentlyN_
         [ alice <## "invitation to join the group #tennis sent to bob",
@@ -1340,7 +1378,7 @@ testUpdateMemberRole =
       connectUsers alice bob
       alice ##> "/g team"
       alice <## "group #team is created"
-      alice <## "use /a team <name> to add members"
+      alice <## "to add members use /a team <name> or /create link #team"
       addMember "team" alice bob GRAdmin
       alice ##> "/mr team bob member"
       alice <## "#team: you changed the role of bob from admin to member"
@@ -1379,6 +1417,154 @@ testUpdateMemberRole =
       alice ##> "/d #team"
       alice <## "you have insufficient permissions for this group command"
 
+testGroupDeleteUnusedContacts :: IO ()
+testGroupDeleteUnusedContacts =
+  testChat3 aliceProfile bobProfile cathProfile $
+    \alice bob cath -> do
+      -- create group 1
+      createGroup3 "team" alice bob cath
+      -- create group 2
+      alice ##> "/g club"
+      alice <## "group #club is created"
+      alice <## "to add members use /a club <name> or /create link #club"
+      alice ##> "/a club bob"
+      concurrentlyN_
+        [ alice <## "invitation to join the group #club sent to bob",
+          do
+            bob <## "#club: alice invites you to join the group as admin"
+            bob <## "use /j club to accept"
+        ]
+      bob ##> "/j club"
+      concurrently_
+        (alice <## "#club: bob joined the group")
+        (bob <## "#club: you joined the group")
+      alice ##> "/a club cath"
+      concurrentlyN_
+        [ alice <## "invitation to join the group #club sent to cath",
+          do
+            cath <## "#club: alice invites you to join the group as admin"
+            cath <## "use /j club to accept"
+        ]
+      cath ##> "/j club"
+      concurrentlyN_
+        [ alice <## "#club: cath joined the group",
+          do
+            cath <## "#club: you joined the group"
+            cath <## "#club: member bob_1 (Bob) is connected"
+            cath <## "contact bob_1 is merged into bob"
+            cath <## "use @bob <message> to send messages",
+          do
+            bob <## "#club: alice added cath_1 (Catherine) to the group (connecting...)"
+            bob <## "#club: new member cath_1 is connected"
+            bob <## "contact cath_1 is merged into cath"
+            bob <## "use @cath <message> to send messages"
+        ]
+      -- list contacts
+      bob ##> "/cs"
+      bob <## "alice (Alice)"
+      bob <## "cath (Catherine)"
+      cath ##> "/cs"
+      cath <## "alice (Alice)"
+      cath <## "bob (Bob)"
+      -- delete group 1, contacts and profiles are kept
+      deleteGroup alice bob cath "team"
+      bob ##> "/cs"
+      bob <## "alice (Alice)"
+      bob <## "cath (Catherine)"
+      bob `hasContactProfiles` ["alice", "bob", "cath"]
+      cath ##> "/cs"
+      cath <## "alice (Alice)"
+      cath <## "bob (Bob)"
+      cath `hasContactProfiles` ["alice", "bob", "cath"]
+      -- delete group 2, unused contacts and profiles are deleted
+      deleteGroup alice bob cath "club"
+      bob ##> "/cs"
+      bob <## "alice (Alice)"
+      bob `hasContactProfiles` ["alice", "bob"]
+      cath ##> "/cs"
+      cath <## "alice (Alice)"
+      cath `hasContactProfiles` ["alice", "cath"]
+  where
+    deleteGroup alice bob cath group = do
+      alice ##> ("/d #" <> group)
+      concurrentlyN_
+        [ alice <## ("#" <> group <> ": you deleted the group"),
+          do
+            bob <## ("#" <> group <> ": alice deleted the group")
+            bob <## ("use /d #" <> group <> " to delete the local copy of the group"),
+          do
+            cath <## ("#" <> group <> ": alice deleted the group")
+            cath <## ("use /d #" <> group <> " to delete the local copy of the group")
+        ]
+      bob ##> ("/d #" <> group)
+      bob <## ("#" <> group <> ": you deleted the group")
+      cath ##> ("/d #" <> group)
+      cath <## ("#" <> group <> ": you deleted the group")
+
+testGroupDescription :: IO ()
+testGroupDescription = testChat4 aliceProfile bobProfile cathProfile danProfile $ \alice bob cath dan -> do
+  connectUsers alice bob
+  alice ##> "/g team"
+  alice <## "group #team is created"
+  alice <## "to add members use /a team <name> or /create link #team"
+  addMember "team" alice bob GRAdmin
+  bob ##> "/j team"
+  concurrentlyN_
+    [ alice <## "#team: bob joined the group",
+      bob <## "#team: you joined the group"
+    ]
+  alice ##> "/group_profile team"
+  alice <## "#team"
+  groupInfo alice
+  alice ##> "/group_descr team Welcome to the team!"
+  alice <## "description changed to:"
+  alice <## "Welcome to the team!"
+  bob <## "alice updated group #team:"
+  bob <## "description changed to:"
+  bob <## "Welcome to the team!"
+  alice ##> "/group_profile team"
+  alice <## "#team"
+  alice <## "description:"
+  alice <## "Welcome to the team!"
+  groupInfo alice
+  connectUsers alice cath
+  addMember "team" alice cath GRMember
+  cath ##> "/j team"
+  concurrentlyN_
+    [ alice <## "#team: cath joined the group",
+      do
+        cath <## "#team: you joined the group"
+        cath <# "#team alice> Welcome to the team!"
+        cath <## "#team: member bob (Bob) is connected",
+      do
+        bob <## "#team: alice added cath (Catherine) to the group (connecting...)"
+        bob <## "#team: new member cath is connected"
+    ]
+  connectUsers bob dan
+  addMember "team" bob dan GRMember
+  dan ##> "/j team"
+  concurrentlyN_
+    [ bob <## "#team: dan joined the group",
+      do
+        dan <## "#team: you joined the group"
+        dan <# "#team bob> Welcome to the team!"
+        dan
+          <### [ "#team: member alice (Alice) is connected",
+                 "#team: member cath (Catherine) is connected"
+               ],
+      bobAddedDan alice,
+      bobAddedDan cath
+    ]
+  where
+    groupInfo alice = do
+      alice <## "group preferences:"
+      alice <## "Direct messages enabled: on"
+      alice <## "Full deletion enabled: off"
+      alice <## "Voice messages enabled: on"
+    bobAddedDan cc = do
+      cc <## "#team: bob added dan (Daniel) to the group (connecting...)"
+      cc <## "#team: new member dan is connected"
+
 testGroupAsync :: IO ()
 testGroupAsync = withTmpFiles $ do
   print (0 :: Integer)
@@ -1387,7 +1573,7 @@ testGroupAsync = withTmpFiles $ do
       connectUsers alice bob
       alice ##> "/g team"
       alice <## "group #team is created"
-      alice <## "use /a team <name> to add members"
+      alice <## "to add members use /a team <name> or /create link #team"
       alice ##> "/a team bob"
       concurrentlyN_
         [ alice <## "invitation to join the group #team sent to bob",
@@ -2570,7 +2756,7 @@ testAutoReplyMessageInIncognito = testChat2 aliceProfile bobProfile $
         do
           alice <## ("bob (Bob): contact is connected, your incognito profile for this contact is " <> aliceIncognito)
           alice
-            <### [ "use /info bob to print out this incognito profile again",
+            <### [ "use /i bob to print out this incognito profile again",
                    WithTime "i @bob hello!"
                  ]
       ]
@@ -2589,10 +2775,10 @@ testConnectIncognitoInvitationLink = testChat3 aliceProfile bobProfile cathProfi
     concurrentlyN_
       [ do
           bob <## (aliceIncognito <> ": contact is connected, your incognito profile for this contact is " <> bobIncognito)
-          bob <## ("use /info " <> aliceIncognito <> " to print out this incognito profile again"),
+          bob <## ("use /i " <> aliceIncognito <> " to print out this incognito profile again"),
         do
           alice <## (bobIncognito <> ": contact is connected, your incognito profile for this contact is " <> aliceIncognito)
-          alice <## ("use /info " <> bobIncognito <> " to print out this incognito profile again")
+          alice <## ("use /i " <> bobIncognito <> " to print out this incognito profile again")
       ]
     -- after turning incognito mode off conversation is incognito
     alice #$> ("/incognito off", id, "ok")
@@ -2630,6 +2816,28 @@ testConnectIncognitoInvitationLink = testChat3 aliceProfile bobProfile cathProfi
     alice <## "Full deletion: off (you allow: no, contact allows: no)"
     bob <## (aliceIncognito <> " updated preferences for you:")
     bob <## "Full deletion: off (you allow: no, contact allows: no)"
+    -- list contacts
+    alice ##> "/cs"
+    alice
+      <### [ ConsoleString $ "i " <> bobIncognito,
+             "cath (Catherine)"
+           ]
+    alice `hasContactProfiles` ["alice", T.pack aliceIncognito, T.pack bobIncognito, "cath"]
+    bob ##> "/cs"
+    bob <## ("i " <> aliceIncognito)
+    bob `hasContactProfiles` ["bob", T.pack aliceIncognito, T.pack bobIncognito]
+    -- alice deletes contact, incognito profile is deleted
+    alice ##> ("/d " <> bobIncognito)
+    alice <## (bobIncognito <> ": contact is deleted")
+    alice ##> "/cs"
+    alice <## "cath (Catherine)"
+    alice `hasContactProfiles` ["alice", "cath"]
+    -- bob deletes contact, incognito profile is deleted
+    bob ##> ("/d " <> aliceIncognito)
+    bob <## (aliceIncognito <> ": contact is deleted")
+    bob ##> "/cs"
+    (bob </)
+    bob `hasContactProfiles` ["bob"]
 
 testConnectIncognitoContactAddress :: IO ()
 testConnectIncognitoContactAddress = testChat2 aliceProfile bobProfile $
@@ -2649,7 +2857,7 @@ testConnectIncognitoContactAddress = testChat2 aliceProfile bobProfile $
     concurrentlyN_
       [ do
           bob <## ("alice (Alice): contact is connected, your incognito profile for this contact is " <> bobIncognito)
-          bob <## "use /info alice to print out this incognito profile again",
+          bob <## "use /i alice to print out this incognito profile again",
         alice <## (bobIncognito <> ": contact is connected")
       ]
     -- after turning incognito mode off conversation is incognito
@@ -2659,6 +2867,16 @@ testConnectIncognitoContactAddress = testChat2 aliceProfile bobProfile $
     bob ?<# "alice> who are you?"
     bob ?#> "@alice I'm Batman"
     alice <# (bobIncognito <> "> I'm Batman")
+    -- list contacts
+    bob ##> "/cs"
+    bob <## "i alice (Alice)"
+    bob `hasContactProfiles` ["alice", "bob", T.pack bobIncognito]
+    -- delete contact, incognito profile is deleted
+    bob ##> "/d alice"
+    bob <## "alice: contact is deleted"
+    bob ##> "/cs"
+    (bob </)
+    bob `hasContactProfiles` ["bob"]
 
 testAcceptContactRequestIncognito :: IO ()
 testAcceptContactRequestIncognito = testChat2 aliceProfile bobProfile $
@@ -2675,7 +2893,7 @@ testAcceptContactRequestIncognito = testChat2 aliceProfile bobProfile $
       [ bob <## (aliceIncognito <> ": contact is connected"),
         do
           alice <## ("bob (Bob): contact is connected, your incognito profile for this contact is " <> aliceIncognito)
-          alice <## "use /info bob to print out this incognito profile again"
+          alice <## "use /i bob to print out this incognito profile again"
       ]
     -- after turning incognito mode off conversation is incognito
     alice #$> ("/incognito off", id, "ok")
@@ -2684,6 +2902,16 @@ testAcceptContactRequestIncognito = testChat2 aliceProfile bobProfile $
     bob <# (aliceIncognito <> "> my profile is totally inconspicuous")
     bob #> ("@" <> aliceIncognito <> " I know!")
     alice ?<# "bob> I know!"
+    -- list contacts
+    alice ##> "/cs"
+    alice <## "i bob (Bob)"
+    alice `hasContactProfiles` ["alice", "bob", T.pack aliceIncognito]
+    -- delete contact, incognito profile is deleted
+    alice ##> "/d bob"
+    alice <## "bob: contact is deleted"
+    alice ##> "/cs"
+    (alice </)
+    alice `hasContactProfiles` ["alice"]
 
 testJoinGroupIncognito :: IO ()
 testJoinGroupIncognito = testChat4 aliceProfile bobProfile cathProfile danProfile $
@@ -2704,13 +2932,13 @@ testJoinGroupIncognito = testChat4 aliceProfile bobProfile cathProfile danProfil
     concurrentlyN_
       [ do
           cath <## ("alice (Alice): contact is connected, your incognito profile for this contact is " <> cathIncognito)
-          cath <## "use /info alice to print out this incognito profile again",
+          cath <## "use /i alice to print out this incognito profile again",
         alice <## (cathIncognito <> ": contact is connected")
       ]
     -- alice creates group
     alice ##> "/g secret_club"
     alice <## "group #secret_club is created"
-    alice <## "use /a secret_club <name> to add members"
+    alice <## "to add members use /a secret_club <name> or /create link #secret_club"
     -- alice invites bob
     alice ##> "/a secret_club bob"
     concurrentlyN_
@@ -2890,13 +3118,13 @@ testCantInviteContactIncognito = testChat2 aliceProfile bobProfile $
       [ bob <## (aliceIncognito <> ": contact is connected"),
         do
           alice <## ("bob (Bob): contact is connected, your incognito profile for this contact is " <> aliceIncognito)
-          alice <## "use /info bob to print out this incognito profile again"
+          alice <## "use /i bob to print out this incognito profile again"
       ]
     -- alice creates group non incognito
     alice #$> ("/incognito off", id, "ok")
     alice ##> "/g club"
     alice <## "group #club is created"
-    alice <## "use /a club <name> to add members"
+    alice <## "to add members use /a club <name> or /create link #club"
     alice ##> "/a club bob"
     alice <## "you're using your main profile for this group - prohibited to invite contacts to whom you are connected incognito"
     -- bob doesn't receive invitation
@@ -2920,7 +3148,7 @@ testCantSeeGlobalPrefsUpdateIncognito = testChat3 aliceProfile bobProfile cathPr
       [ bob <## (aliceIncognito <> ": contact is connected"),
         do
           alice <## ("bob (Bob): contact is connected, your incognito profile for this contact is " <> aliceIncognito)
-          alice <## "use /info bob to print out this incognito profile again",
+          alice <## "use /i bob to print out this incognito profile again",
         do
           cath <## "alice (Alice): contact is connected"
       ]
@@ -2954,6 +3182,110 @@ testCantSeeGlobalPrefsUpdateIncognito = testChat3 aliceProfile bobProfile cathPr
     alice <## "Full deletion: off (you allow: yes, contact allows: no)"
     cath <## "alice updated preferences for you:"
     cath <## "Full deletion: off (you allow: default (no), contact allows: yes)"
+
+testDeleteContactThenGroupDeletesIncognitoProfile :: IO ()
+testDeleteContactThenGroupDeletesIncognitoProfile = testChat2 aliceProfile bobProfile $
+  \alice bob -> do
+    -- bob connects incognito to alice
+    alice ##> "/c"
+    inv <- getInvitation alice
+    bob #$> ("/incognito on", id, "ok")
+    bob ##> ("/c " <> inv)
+    bob <## "confirmation sent!"
+    bobIncognito <- getTermLine bob
+    concurrentlyN_
+      [ alice <## (bobIncognito <> ": contact is connected"),
+        do
+          bob <## ("alice (Alice): contact is connected, your incognito profile for this contact is " <> bobIncognito)
+          bob <## "use /i alice to print out this incognito profile again"
+      ]
+    -- bob joins group using incognito profile
+    alice ##> "/g team"
+    alice <## "group #team is created"
+    alice <## "to add members use /a team <name> or /create link #team"
+    alice ##> ("/a team " <> bobIncognito)
+    concurrentlyN_
+      [ alice <## ("invitation to join the group #team sent to " <> bobIncognito),
+        do
+          bob <## "#team: alice invites you to join the group as admin"
+          bob <## ("use /j team to join incognito as " <> bobIncognito)
+      ]
+    bob ##> "/j team"
+    concurrently_
+      (alice <## ("#team: " <> bobIncognito <> " joined the group"))
+      (bob <## ("#team: you joined the group incognito as " <> bobIncognito))
+    bob ##> "/cs"
+    bob <## "i alice (Alice)"
+    bob `hasContactProfiles` ["alice", "bob", T.pack bobIncognito]
+    -- delete contact
+    bob ##> "/d alice"
+    bob <## "alice: contact is deleted"
+    bob ##> "/cs"
+    (bob </)
+    bob `hasContactProfiles` ["alice", "bob", T.pack bobIncognito]
+    -- delete group
+    bob ##> "/l team"
+    concurrentlyN_
+      [ do
+          bob <## "#team: you left the group"
+          bob <## "use /d #team to delete the group",
+        alice <## ("#team: " <> bobIncognito <> " left the group")
+      ]
+    bob ##> "/d #team"
+    bob <## "#team: you deleted the group"
+    bob `hasContactProfiles` ["bob"]
+
+testDeleteGroupThenContactDeletesIncognitoProfile :: IO ()
+testDeleteGroupThenContactDeletesIncognitoProfile = testChat2 aliceProfile bobProfile $
+  \alice bob -> do
+    -- bob connects incognito to alice
+    alice ##> "/c"
+    inv <- getInvitation alice
+    bob #$> ("/incognito on", id, "ok")
+    bob ##> ("/c " <> inv)
+    bob <## "confirmation sent!"
+    bobIncognito <- getTermLine bob
+    concurrentlyN_
+      [ alice <## (bobIncognito <> ": contact is connected"),
+        do
+          bob <## ("alice (Alice): contact is connected, your incognito profile for this contact is " <> bobIncognito)
+          bob <## "use /i alice to print out this incognito profile again"
+      ]
+    -- bob joins group using incognito profile
+    alice ##> "/g team"
+    alice <## "group #team is created"
+    alice <## "to add members use /a team <name> or /create link #team"
+    alice ##> ("/a team " <> bobIncognito)
+    concurrentlyN_
+      [ alice <## ("invitation to join the group #team sent to " <> bobIncognito),
+        do
+          bob <## "#team: alice invites you to join the group as admin"
+          bob <## ("use /j team to join incognito as " <> bobIncognito)
+      ]
+    bob ##> "/j team"
+    concurrently_
+      (alice <## ("#team: " <> bobIncognito <> " joined the group"))
+      (bob <## ("#team: you joined the group incognito as " <> bobIncognito))
+    bob ##> "/cs"
+    bob <## "i alice (Alice)"
+    bob `hasContactProfiles` ["alice", "bob", T.pack bobIncognito]
+    -- delete group
+    bob ##> "/l team"
+    concurrentlyN_
+      [ do
+          bob <## "#team: you left the group"
+          bob <## "use /d #team to delete the group",
+        alice <## ("#team: " <> bobIncognito <> " left the group")
+      ]
+    bob ##> "/d #team"
+    bob <## "#team: you deleted the group"
+    bob `hasContactProfiles` ["alice", "bob", T.pack bobIncognito]
+    -- delete contact
+    bob ##> "/d alice"
+    bob <## "alice: contact is deleted"
+    bob ##> "/cs"
+    (bob </)
+    bob `hasContactProfiles` ["bob"]
 
 testSetAlias :: IO ()
 testSetAlias = testChat2 aliceProfile bobProfile $
@@ -3182,19 +3514,19 @@ testProhibitDirectMessages =
     addMember "team" cath dan GRMember
     dan ##> "/j #team"
     concurrentlyN_
-      [ cath <## ("#team: dan joined the group"),
+      [ cath <## "#team: dan joined the group",
         do
-          dan <## ("#team: you joined the group")
-          dan <### 
-                [ "#team: member alice (Alice) is connected",
-                  "#team: member bob (Bob) is connected"
-                ],
+          dan <## "#team: you joined the group"
+          dan
+            <### [ "#team: member alice (Alice) is connected",
+                   "#team: member bob (Bob) is connected"
+                 ],
         do
-          alice <## ("#team: cath added dan (Daniel) to the group (connecting...)")
-          alice <## ("#team: new member dan is connected"),
+          alice <## "#team: cath added dan (Daniel) to the group (connecting...)"
+          alice <## "#team: new member dan is connected",
         do
-          bob <## ("#team: cath added dan (Daniel) to the group (connecting...)")
-          bob <## ("#team: new member dan is connected")
+          bob <## "#team: cath added dan (Daniel) to the group (connecting...)"
+          bob <## "#team: new member dan is connected"
       ]
     alice ##> "@dan hi"
     alice <## "direct messages to indirect contact dan are prohibited"
@@ -3241,7 +3573,7 @@ testTestSMPServerConnection =
       alice ##> "/smp test smp://LcJUMfVhwD8yxjAiSaDzzGF3-kLG4Uh0Fl_ZIjrRwjI=:server_password@localhost:5001"
       alice <## "SMP server test passed"
       alice ##> "/smp test smp://LcJU@localhost:5001"
-      alice <## ("SMP server test failed at Connect, error: BROKER smp://LcJU@localhost:5001 NETWORK")
+      alice <## "SMP server test failed at Connect, error: BROKER smp://LcJU@localhost:5001 NETWORK"
       alice <## "Possibly, certificate fingerprint in server address is incorrect"
 
 testAsyncInitiatingOffline :: IO ()
@@ -3834,7 +4166,7 @@ testGroupLink =
     \alice bob cath -> do
       alice ##> "/g team"
       alice <## "group #team is created"
-      alice <## "use /a team <name> to add members"
+      alice <## "to add members use /a team <name> or /create link #team"
       alice ##> "/show link #team"
       alice <## "no group link, to create: /create link #team"
       alice ##> "/create link #team"
@@ -3864,9 +4196,6 @@ testGroupLink =
       -- contacts connected via group link are not in chat previews
       alice @@@ [("#team", "connected")]
       bob @@@ [("#team", "connected")]
-      -- calling /_get chat api marks it as used and adds it to chat previews
-      alice #$> ("/_get chat @2 count=100", chat, [])
-      alice @@@ [("@bob", ""), ("#team", "connected")]
       alice <##> bob
       alice @@@ [("@bob", "hey"), ("#team", "connected")]
 
@@ -3937,7 +4266,7 @@ testGroupLinkDeleteGroupRejoin =
     \alice bob -> do
       alice ##> "/g team"
       alice <## "group #team is created"
-      alice <## "use /a team <name> to add members"
+      alice <## "to add members use /a team <name> or /create link #team"
       alice ##> "/create link #team"
       gLink <- getGroupLink alice "team" True
       bob ##> ("/c " <> gLink)
@@ -3993,7 +4322,7 @@ testGroupLinkContactUsed =
     \alice bob -> do
       alice ##> "/g team"
       alice <## "group #team is created"
-      alice <## "use /a team <name> to add members"
+      alice <## "to add members use /a team <name> or /create link #team"
       alice ##> "/create link #team"
       gLink <- getGroupLink alice "team" True
       bob ##> ("/c " <> gLink)
@@ -4032,14 +4361,14 @@ testGroupLinkIncognitoMembership =
       concurrentlyN_
         [ do
             bob <## ("alice (Alice): contact is connected, your incognito profile for this contact is " <> bobIncognito)
-            bob <## "use /info alice to print out this incognito profile again",
+            bob <## "use /i alice to print out this incognito profile again",
           alice <## (bobIncognito <> ": contact is connected")
         ]
       bob #$> ("/incognito off", id, "ok")
       -- alice creates group
       alice ##> "/g team"
       alice <## "group #team is created"
-      alice <## "use /a team <name> to add members"
+      alice <## "to add members use /a team <name> or /create link #team"
       -- alice invites bob
       alice ##> ("/a team " <> bobIncognito)
       concurrentlyN_
@@ -4062,7 +4391,7 @@ testGroupLinkIncognitoMembership =
       concurrentlyN_
         [ do
             bob <## ("cath (Catherine): contact is connected, your incognito profile for this contact is " <> bobIncognito)
-            bob <## "use /info cath to print out this incognito profile again"
+            bob <## "use /i cath to print out this incognito profile again"
             bob <## "cath invited to group #team via your group link"
             bob <## "#team: cath joined the group",
           do
@@ -4088,12 +4417,12 @@ testGroupLinkIncognitoMembership =
       concurrentlyN_
         [ do
             bob <## (danIncognito <> ": contact is connected, your incognito profile for this contact is " <> bobIncognito)
-            bob <## ("use /info " <> danIncognito <> " to print out this incognito profile again")
+            bob <## ("use /i " <> danIncognito <> " to print out this incognito profile again")
             bob <## (danIncognito <> " invited to group #team via your group link")
             bob <## ("#team: " <> danIncognito <> " joined the group"),
           do
             dan <## (bobIncognito <> ": contact is connected, your incognito profile for this contact is " <> danIncognito)
-            dan <## ("use /info " <> bobIncognito <> " to print out this incognito profile again")
+            dan <## ("use /i " <> bobIncognito <> " to print out this incognito profile again")
             dan <## ("#team: you joined the group incognito as " <> danIncognito)
             dan
               <### [ "#team: member alice (Alice) is connected",
@@ -4136,6 +4465,134 @@ testGroupLinkIncognitoMembership =
           cath <# ("#team " <> danIncognito <> "> how is it going?")
         ]
 
+testGroupLinkUnusedHostContactDeleted :: IO ()
+testGroupLinkUnusedHostContactDeleted =
+  testChat2 aliceProfile bobProfile $
+    \alice bob -> do
+      -- create group 1
+      alice ##> "/g team"
+      alice <## "group #team is created"
+      alice <## "to add members use /a team <name> or /create link #team"
+      alice ##> "/create link #team"
+      gLinkTeam <- getGroupLink alice "team" True
+      bob ##> ("/c " <> gLinkTeam)
+      bob <## "connection request sent!"
+      alice <## "bob (Bob): accepting request to join group #team..."
+      concurrentlyN_
+        [ do
+            alice <## "bob (Bob): contact is connected"
+            alice <## "bob invited to group #team via your group link"
+            alice <## "#team: bob joined the group",
+          do
+            bob <## "alice (Alice): contact is connected"
+            bob <## "#team: you joined the group"
+        ]
+      -- create group 2
+      alice ##> "/g club"
+      alice <## "group #club is created"
+      alice <## "to add members use /a club <name> or /create link #club"
+      alice ##> "/create link #club"
+      gLinkClub <- getGroupLink alice "club" True
+      bob ##> ("/c " <> gLinkClub)
+      bob <## "connection request sent!"
+      alice <## "bob_1 (Bob): accepting request to join group #club..."
+      concurrentlyN_
+        [ alice
+            <### [ "bob_1 (Bob): contact is connected",
+                   "contact bob_1 is merged into bob",
+                   "use @bob <message> to send messages",
+                   EndsWith "invited to group #club via your group link",
+                   EndsWith "joined the group"
+                 ],
+          bob
+            <### [ "alice_1 (Alice): contact is connected",
+                   "contact alice_1 is merged into alice",
+                   "use @alice <message> to send messages",
+                   "#club: you joined the group"
+                 ]
+        ]
+      -- list contacts
+      bob ##> "/cs"
+      bob <## "alice (Alice)"
+      -- delete group 1, host contact and profile are kept
+      bobLeaveDeleteGroup alice bob "team"
+      bob ##> "/cs"
+      bob <## "alice (Alice)"
+      bob `hasContactProfiles` ["alice", "bob"]
+      -- delete group 2, unused host contact and profile are deleted
+      bobLeaveDeleteGroup alice bob "club"
+      bob ##> "/cs"
+      (bob </)
+      bob `hasContactProfiles` ["bob"]
+  where
+    bobLeaveDeleteGroup alice bob group = do
+      bob ##> ("/l " <> group)
+      concurrentlyN_
+        [ do
+            bob <## ("#" <> group <> ": you left the group")
+            bob <## ("use /d #" <> group <> " to delete the group"),
+          alice <## ("#" <> group <> ": bob left the group")
+        ]
+      bob ##> ("/d #" <> group)
+      bob <## ("#" <> group <> ": you deleted the group")
+
+testGroupLinkIncognitoUnusedHostContactsDeleted :: IO ()
+testGroupLinkIncognitoUnusedHostContactsDeleted =
+  testChat2 aliceProfile bobProfile $
+    \alice bob -> do
+      bob #$> ("/incognito on", id, "ok")
+      bobIncognitoTeam <- createGroupBobIncognito alice bob "team" "alice"
+      bobIncognitoClub <- createGroupBobIncognito alice bob "club" "alice_1"
+      bobIncognitoTeam `shouldNotBe` bobIncognitoClub
+      -- list contacts
+      bob ##> "/cs"
+      bob <## "i alice (Alice)"
+      bob <## "i alice_1 (Alice)"
+      bob `hasContactProfiles` ["alice", "alice", "bob", T.pack bobIncognitoTeam, T.pack bobIncognitoClub]
+      -- delete group 1, unused host contact and profile are deleted
+      bobLeaveDeleteGroup alice bob "team" bobIncognitoTeam
+      bob ##> "/cs"
+      bob <## "i alice_1 (Alice)"
+      bob `hasContactProfiles` ["alice", "bob", T.pack bobIncognitoClub]
+      -- delete group 2, unused host contact and profile are deleted
+      bobLeaveDeleteGroup alice bob "club" bobIncognitoClub
+      bob ##> "/cs"
+      (bob </)
+      bob `hasContactProfiles` ["bob"]
+  where
+    createGroupBobIncognito alice bob group bobsAliceContact = do
+      alice ##> ("/g " <> group)
+      alice <## ("group #" <> group <> " is created")
+      alice <## ("to add members use /a " <> group <> " <name> or /create link #" <> group)
+      alice ##> ("/create link #" <> group)
+      gLinkTeam <- getGroupLink alice group True
+      bob ##> ("/c " <> gLinkTeam)
+      bobIncognito <- getTermLine bob
+      bob <## "connection request sent incognito!"
+      alice <## (bobIncognito <> ": accepting request to join group #" <> group <> "...")
+      _ <- getTermLine bob
+      concurrentlyN_
+        [ do
+            alice <## (bobIncognito <> ": contact is connected")
+            alice <## (bobIncognito <> " invited to group #" <> group <> " via your group link")
+            alice <## ("#" <> group <> ": " <> bobIncognito <> " joined the group"),
+          do
+            bob <## (bobsAliceContact <> " (Alice): contact is connected, your incognito profile for this contact is " <> bobIncognito)
+            bob <## ("use /i " <> bobsAliceContact <> " to print out this incognito profile again")
+            bob <## ("#" <> group <> ": you joined the group incognito as " <> bobIncognito)
+        ]
+      pure bobIncognito
+    bobLeaveDeleteGroup alice bob group bobIncognito = do
+      bob ##> ("/l " <> group)
+      concurrentlyN_
+        [ do
+            bob <## ("#" <> group <> ": you left the group")
+            bob <## ("use /d #" <> group <> " to delete the group"),
+          alice <## ("#" <> group <> ": " <> bobIncognito <> " left the group")
+        ]
+      bob ##> ("/d #" <> group)
+      bob <## ("#" <> group <> ": you deleted the group")
+
 testSwitchContact :: IO ()
 testSwitchContact =
   testChat2 aliceProfile bobProfile $
@@ -4166,6 +4623,68 @@ testSwitchGroupMember =
       bob <# "#team alice> hey"
       bob #> "#team hi"
       alice <# "#team bob> hi"
+
+testMarkContactVerified :: IO ()
+testMarkContactVerified =
+  testChat2 aliceProfile bobProfile $ \alice bob -> do
+    connectUsers alice bob
+    alice ##> "/i bob"
+    bobInfo alice
+    alice <## "connection not verified, use /code command to see security code"
+    alice ##> "/code bob"
+    bCode <- getTermLine alice
+    bob ##> "/code alice"
+    aCode <- getTermLine bob
+    bCode `shouldBe` aCode
+    alice ##> "/verify bob 123"
+    alice <##. "connection not verified, current code is "
+    alice ##> ("/verify bob " <> aCode)
+    alice <## "connection verified"
+    alice ##> "/i bob"
+    bobInfo alice
+    alice <## "connection verified"
+    alice ##> "/verify bob"
+    alice <##. "connection not verified, current code is "
+    alice ##> "/i bob"
+    bobInfo alice
+    alice <## "connection not verified, use /code command to see security code"
+  where
+    bobInfo alice = do
+      alice <## "contact ID: 2"
+      alice <## "receiving messages via: localhost"
+      alice <## "sending messages via: localhost"
+      alice <## "you've shared main profile with this contact"
+
+testMarkGroupMemberVerified :: IO ()
+testMarkGroupMemberVerified =
+  testChat2 aliceProfile bobProfile $ \alice bob -> do
+    createGroup2 "team" alice bob
+    alice ##> "/i #team bob"
+    bobInfo alice
+    alice <## "connection not verified, use /code command to see security code"
+    alice ##> "/code #team bob"
+    bCode <- getTermLine alice
+    bob ##> "/code #team alice"
+    aCode <- getTermLine bob
+    bCode `shouldBe` aCode
+    alice ##> "/verify #team bob 123"
+    alice <##. "connection not verified, current code is "
+    alice ##> ("/verify #team bob " <> aCode)
+    alice <## "connection verified"
+    alice ##> "/i #team bob"
+    bobInfo alice
+    alice <## "connection verified"
+    alice ##> "/verify #team bob"
+    alice <##. "connection not verified, current code is "
+    alice ##> "/i #team bob"
+    bobInfo alice
+    alice <## "connection not verified, use /code command to see security code"
+  where
+    bobInfo alice = do
+      alice <## "group ID: 1"
+      alice <## "member ID: 2"
+      alice <## "receiving messages via: localhost"
+      alice <## "sending messages via: localhost"
 
 withTestChatContactConnected :: String -> (TestCC -> IO a) -> IO a
 withTestChatContactConnected dbPrefix action =
@@ -4257,7 +4776,7 @@ createGroup2 gName cc1 cc2 = do
   name2 <- userName cc2
   cc1 ##> ("/g " <> gName)
   cc1 <## ("group #" <> gName <> " is created")
-  cc1 <## ("use /a " <> gName <> " <name> to add members")
+  cc1 <## ("to add members use /a " <> gName <> " <name> or /create link #" <> gName)
   addMember gName cc1 cc2 GRAdmin
   cc2 ##> ("/j " <> gName)
   concurrently_
@@ -4482,3 +5001,16 @@ getGroupLink cc gName created = do
   cc <## ("to show it again: /show link #" <> gName)
   cc <## ("to delete it: /delete link #" <> gName <> " (joined members will remain connected to you)")
   pure link
+
+hasContactProfiles :: TestCC -> [ContactName] -> Expectation
+hasContactProfiles cc names =
+  getContactProfiles cc >>= \ps -> ps `shouldMatchList` names
+
+getContactProfiles :: TestCC -> IO [ContactName]
+getContactProfiles cc = do
+  user_ <- readTVarIO (currentUser $ chatController cc)
+  case user_ of
+    Nothing -> pure []
+    Just user -> do
+      profiles <- withTransaction (chatStore $ chatController cc) $ \db -> getUserContactProfiles db user
+      pure $ map (\Profile {displayName} -> displayName) profiles
