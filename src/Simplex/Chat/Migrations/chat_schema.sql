@@ -60,6 +60,7 @@ CREATE TABLE contacts(
   unread_chat INTEGER DEFAULT 0 CHECK(unread_chat NOT NULL),
   contact_used INTEGER DEFAULT 0 CHECK(contact_used NOT NULL),
   user_preferences TEXT DEFAULT '{}' CHECK(user_preferences NOT NULL),
+  confirm_pref_pending INTEGER DEFAULT 0 CHECK(confirm_pref_pending NOT NULL),
   FOREIGN KEY(user_id, local_display_name)
   REFERENCES display_names(user_id, local_display_name)
   ON DELETE CASCADE
@@ -365,7 +366,10 @@ CREATE TABLE chat_items(
   quoted_content TEXT,
   quoted_sent INTEGER,
   quoted_member_id BLOB,
-  item_edited INTEGER
+  item_edited INTEGER,
+  timed_ttl INTEGER,
+  timed_delete_at TEXT,
+  item_live INTEGER
 );
 CREATE TABLE chat_item_messages(
   chat_item_id INTEGER NOT NULL REFERENCES chat_items ON DELETE CASCADE,
@@ -456,3 +460,4 @@ CREATE UNIQUE INDEX idx_snd_files_last_inline_msg_delivery_id ON snd_files(
 CREATE INDEX idx_messages_connection_id ON messages(connection_id);
 CREATE INDEX idx_chat_items_group_member_id ON chat_items(group_member_id);
 CREATE INDEX idx_chat_items_contact_id ON chat_items(contact_id);
+CREATE INDEX idx_chat_items_timed_delete_at ON chat_items(timed_delete_at);

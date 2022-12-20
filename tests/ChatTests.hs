@@ -140,6 +140,8 @@ chatTests = do
     it "allow full deletion to contact" testAllowFullDeletionContact
     it "allow full deletion to group" testAllowFullDeletionGroup
     it "prohibit direct messages to group members" testProhibitDirectMessages
+    it "enable timed messages with contact" testEnableTimedMessagesContact
+    it "enable timed messages in group" testEnableTimedMessagesGroup
   describe "SMP servers" $ do
     it "get and set SMP servers" testGetSetSMPServers
     it "test SMP server connection" testTestSMPServerConnection
@@ -375,7 +377,8 @@ testDirectMessageUpdate =
       alice #$> ("/_get chat @2 count=100", chat', chatFeatures' <> [((1, "hello 🙂"), Nothing), ((0, "hi alice"), Just (1, "hello 🙂"))])
       bob #$> ("/_get chat @2 count=100", chat', chatFeatures' <> [((0, "hello 🙂"), Nothing), ((1, "hi alice"), Just (0, "hello 🙂"))])
 
-      alice #$> ("/_update item @2 " <> itemId 1 <> " text hey 👋", id, "message updated")
+      alice ##> ("/_update item @2 " <> itemId 1 <> " text hey 👋")
+      alice <# "@bob [edited] hey 👋"
       bob <# "alice> [edited] hey 👋"
 
       alice #$> ("/_get chat @2 count=100", chat', chatFeatures' <> [((1, "hey 👋"), Nothing), ((0, "hi alice"), Just (1, "hello 🙂"))])
@@ -391,7 +394,8 @@ testDirectMessageUpdate =
       alice #$> ("/_get chat @2 count=100", chat', chatFeatures' <> [((1, "hey 👋"), Nothing), ((0, "hi alice"), Just (1, "hello 🙂")), ((0, "hey alice"), Just (1, "hey 👋"))])
       bob #$> ("/_get chat @2 count=100", chat', chatFeatures' <> [((0, "hey 👋"), Nothing), ((1, "hi alice"), Just (0, "hello 🙂")), ((1, "hey alice"), Just (0, "hey 👋"))])
 
-      alice #$> ("/_update item @2 " <> itemId 1 <> " text greetings 🤝", id, "message updated")
+      alice ##> ("/_update item @2 " <> itemId 1 <> " text greetings 🤝")
+      alice <# "@bob [edited] greetings 🤝"
       bob <# "alice> [edited] greetings 🤝"
 
       alice #$> ("/_update item @2 " <> itemId 2 <> " text updating bob's message", id, "cannot update this item")
@@ -399,11 +403,15 @@ testDirectMessageUpdate =
       alice #$> ("/_get chat @2 count=100", chat', chatFeatures' <> [((1, "greetings 🤝"), Nothing), ((0, "hi alice"), Just (1, "hello 🙂")), ((0, "hey alice"), Just (1, "hey 👋"))])
       bob #$> ("/_get chat @2 count=100", chat', chatFeatures' <> [((0, "greetings 🤝"), Nothing), ((1, "hi alice"), Just (0, "hello 🙂")), ((1, "hey alice"), Just (0, "hey 👋"))])
 
-      bob #$> ("/_update item @2 " <> itemId 2 <> " text hey Alice", id, "message updated")
+      bob ##> ("/_update item @2 " <> itemId 2 <> " text hey Alice")
+      bob <# "@alice [edited] > hello 🙂"
+      bob <## "      hey Alice"
       alice <# "bob> [edited] > hello 🙂"
       alice <## "      hey Alice"
 
-      bob #$> ("/_update item @2 " <> itemId 3 <> " text greetings Alice", id, "message updated")
+      bob ##> ("/_update item @2 " <> itemId 3 <> " text greetings Alice")
+      bob <# "@alice [edited] > hey 👋"
+      bob <## "      greetings Alice"
       alice <# "bob> [edited] > hey 👋"
       alice <## "      greetings Alice"
 
@@ -435,7 +443,9 @@ testDirectMessageDelete =
       alice #$> ("/_get chat @2 count=100", chat, chatFeatures)
 
       -- alice: msg id 1
-      bob #$> ("/_update item @2 " <> itemId 2 <> " text hey alice", id, "message updated")
+      bob ##> ("/_update item @2 " <> itemId 2 <> " text hey alice")
+      bob <# "@alice [edited] > hello 🙂"
+      bob <## "      hey alice"
       alice <# "bob> [edited] hey alice"
       alice @@@ [("@bob", "hey alice")]
       alice #$> ("/_get chat @2 count=100", chat, chatFeatures <> [(0, "hey alice")])
@@ -531,6 +541,7 @@ testGroupShared alice bob cath checkMessages = do
     ]
   when checkMessages $ threadDelay 1000000 -- for deterministic order of messages and "connected" events
   alice #> "#team hello"
+  msgItem1 <- lastItemId alice
   concurrently_
     (bob <# "#team alice> hello")
     (cath <# "#team alice> hello")
@@ -544,8 +555,9 @@ testGroupShared alice bob cath checkMessages = do
   concurrently_
     (alice <# "#team cath> hey team")
     (bob <# "#team cath> hey team")
+  msgItem2 <- lastItemId alice
   bob <##> cath
-  when checkMessages getReadChats
+  when checkMessages $ getReadChats msgItem1 msgItem2
   -- list groups
   alice ##> "/gs"
   alice <## "#team"
@@ -602,14 +614,14 @@ testGroupShared alice bob cath checkMessages = do
   cath #$> ("/clear #team", id, "#team: all messages are removed locally ONLY")
   cath #$> ("/_get chat #1 count=100", chat, [])
   where
-    getReadChats :: IO ()
-    getReadChats = do
+    getReadChats :: String -> String -> IO ()
+    getReadChats msgItem1 msgItem2 = do
       alice @@@ [("#team", "hey team"), ("@cath", "sent invitation to join group team as admin"), ("@bob", "sent invitation to join group team as admin")]
       alice #$> ("/_get chat #1 count=100", chat, [(0, "connected"), (0, "connected"), (1, "hello"), (0, "hi there"), (0, "hey team")])
       -- "before" and "after" define a chat item id across all chats,
       -- so we take into account group event items as well as sent group invitations in direct chats
-      alice #$> ("/_get chat #1 after=" <> groupItemId 2 5 <> " count=100", chat, [(0, "hi there"), (0, "hey team")])
-      alice #$> ("/_get chat #1 before=" <> groupItemId 2 7 <> " count=100", chat, [(0, "connected"), (0, "connected"), (1, "hello"), (0, "hi there")])
+      alice #$> ("/_get chat #1 after=" <> msgItem1 <> " count=100", chat, [(0, "hi there"), (0, "hey team")])
+      alice #$> ("/_get chat #1 before=" <> msgItem2 <> " count=100", chat, [(0, "connected"), (0, "connected"), (1, "hello"), (0, "hi there")])
       alice #$> ("/_get chat #1 count=100 search=team", chat, [(0, "hey team")])
       bob @@@ [("@cath", "hey"), ("#team", "hey team"), ("@alice", "received invitation to join group team as admin")]
       bob #$> ("/_get chat #1 count=100", chat, groupFeatures <> [(0, "connected"), (0, "added cath (Catherine)"), (0, "connected"), (0, "hello"), (1, "hi there"), (0, "hey team")])
@@ -734,7 +746,7 @@ testGroup2 =
         <##? [ "dan> hi",
                "@dan hey"
              ]
-      alice ##> "/t 18"
+      alice ##> "/t 21"
       alice
         <##? [ "@bob sent invitation to join group club as admin",
                "@cath sent invitation to join group club as admin",
@@ -748,10 +760,13 @@ testGroup2 =
                "#club dan> how is it going?",
                "dan> hi",
                "@dan hey",
+               "dan> Disappearing messages: off",
                "dan> Full deletion: off",
                "dan> Voice messages: enabled",
+               "bob> Disappearing messages: off",
                "bob> Full deletion: off",
                "bob> Voice messages: enabled",
+               "cath> Disappearing messages: off",
                "cath> Full deletion: off",
                "cath> Voice messages: enabled"
              ]
@@ -1214,7 +1229,9 @@ testGroupMessageUpdate =
         (bob <# "#team alice> hello!")
         (cath <# "#team alice> hello!")
 
-      alice #$> ("/_update item #1 " <> groupItemId 2 5 <> " text hey 👋", id, "message updated")
+      msgItemId1 <- lastItemId alice
+      alice ##> ("/_update item #1 " <> msgItemId1 <> " text hey 👋")
+      alice <# "#team [edited] hey 👋"
       concurrently_
         (bob <# "#team alice> [edited] hey 👋")
         (cath <# "#team alice> [edited] hey 👋")
@@ -1242,12 +1259,14 @@ testGroupMessageUpdate =
       bob #$> ("/_get chat #1 count=2", chat', [((0, "hey 👋"), Nothing), ((1, "hi alice"), Just (0, "hey 👋"))])
       cath #$> ("/_get chat #1 count=2", chat', [((0, "hey 👋"), Nothing), ((0, "hi alice"), Just (0, "hey 👋"))])
 
-      alice #$> ("/_update item #1 " <> groupItemId 2 5 <> " text greetings 🤝", id, "message updated")
+      alice ##> ("/_update item #1 " <> msgItemId1 <> " text greetings 🤝")
+      alice <# "#team [edited] greetings 🤝"
       concurrently_
         (bob <# "#team alice> [edited] greetings 🤝")
         (cath <# "#team alice> [edited] greetings 🤝")
 
-      alice #$> ("/_update item #1 " <> groupItemId 2 6 <> " text updating bob's message", id, "cannot update this item")
+      msgItemId2 <- lastItemId alice
+      alice #$> ("/_update item #1 " <> msgItemId2 <> " text updating bob's message", id, "cannot update this item")
 
       threadDelay 1000000
       cath `send` "> #team @alice (greetings) greetings!"
@@ -1279,8 +1298,8 @@ testGroupMessageDelete =
         (bob <# "#team alice> hello!")
         (cath <# "#team alice> hello!")
 
-      -- alice: deletes msg id 5
-      alice #$> ("/_delete item #1 " <> groupItemId 2 5 <> " internal", id, "message deleted")
+      msgItemId1 <- lastItemId alice
+      alice #$> ("/_delete item #1 " <> msgItemId1 <> " internal", id, "message deleted")
 
       alice #$> ("/_get chat #1 count=1", chat, [(0, "connected")])
       bob #$> ("/_get chat #1 count=1", chat, [(0, "hello!")])
@@ -1305,15 +1324,18 @@ testGroupMessageDelete =
       bob #$> ("/_get chat #1 count=2", chat', [((0, "hello!"), Nothing), ((1, "hi alic"), Just (0, "hello!"))])
       cath #$> ("/_get chat #1 count=2", chat', [((0, "hello!"), Nothing), ((0, "hi alic"), Just (0, "hello!"))])
 
-      -- alice: deletes msg id 5
-      alice #$> ("/_delete item #1 " <> groupItemId 2 5 <> " internal", id, "message deleted")
+      msgItemId2 <- lastItemId alice
+      alice #$> ("/_delete item #1 " <> msgItemId2 <> " internal", id, "message deleted")
 
       alice #$> ("/_get chat #1 count=1", chat', [((0, "connected"), Nothing)])
       bob #$> ("/_get chat #1 count=2", chat', [((0, "hello!"), Nothing), ((1, "hi alic"), Just (0, "hello!"))])
       cath #$> ("/_get chat #1 count=2", chat', [((0, "hello!"), Nothing), ((0, "hi alic"), Just (0, "hello!"))])
 
       -- alice: msg id 5
-      bob #$> ("/_update item #1 " <> groupItemId 2 7 <> " text hi alice", id, "message updated")
+      msgItemId3 <- lastItemId bob
+      bob ##> ("/_update item #1 " <> msgItemId3 <> " text hi alice")
+      bob <# "#team [edited] > alice hello!"
+      bob <## "      hi alice"
       concurrently_
         (alice <# "#team bob> [edited] hi alice")
         ( do
@@ -1332,13 +1354,16 @@ testGroupMessageDelete =
         (alice <# "#team cath> how are you?")
         (bob <# "#team cath> how are you?")
 
-      cath #$> ("/_delete item #1 " <> groupItemId 2 7 <> " broadcast", id, "message marked deleted")
+      msgItemId4 <- lastItemId cath
+      cath #$> ("/_delete item #1 " <> msgItemId4 <> " broadcast", id, "message marked deleted")
       concurrently_
         (alice <# "#team cath> [marked deleted] how are you?")
         (bob <# "#team cath> [marked deleted] how are you?")
 
-      alice #$> ("/_delete item #1 " <> groupItemId 2 5 <> " broadcast", id, "cannot delete this item")
-      alice #$> ("/_delete item #1 " <> groupItemId 2 5 <> " internal", id, "message deleted")
+      alice ##> "/last_item_id 1"
+      msgItemId6 <- getTermLine alice
+      alice #$> ("/_delete item #1 " <> msgItemId6 <> " broadcast", id, "cannot delete this item")
+      alice #$> ("/_delete item #1 " <> msgItemId6 <> " internal", id, "message deleted")
 
       alice #$> ("/_get chat #1 count=1", chat', [((0, "how are you? [marked deleted]"), Nothing)])
       bob #$> ("/_get chat #1 count=3", chat', [((0, "hello!"), Nothing), ((1, "hi alice"), Just (0, "hello!")), ((0, "how are you? [marked deleted]"), Nothing)])
@@ -1558,6 +1583,7 @@ testGroupDescription = testChat4 aliceProfile bobProfile cathProfile danProfile 
   where
     groupInfo alice = do
       alice <## "group preferences:"
+      alice <## "Disappearing messages enabled: off"
       alice <## "Direct messages enabled: on"
       alice <## "Full deletion enabled: off"
       alice <## "Voice messages enabled: on"
@@ -2419,7 +2445,8 @@ testGroupSendImageWithTextAndQuote =
         (alice <# "#team bob> hi team")
         (cath <# "#team bob> hi team")
       threadDelay 1000000
-      alice ##> ("/_send #1 json {\"filePath\": \"./tests/fixtures/test.jpg\", \"quotedItemId\": " <> groupItemId 2 5 <> ", \"msgContent\": {\"text\":\"hey bob\",\"type\":\"image\",\"image\":\"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAgAAAAIAQMAAAD+wSzIAAAABlBMVEX///+/v7+jQ3Y5AAAADklEQVQI12P4AIX8EAgALgAD/aNpbtEAAAAASUVORK5CYII=\"}}")
+      msgItemId <- lastItemId alice
+      alice ##> ("/_send #1 json {\"filePath\": \"./tests/fixtures/test.jpg\", \"quotedItemId\": " <> msgItemId <> ", \"msgContent\": {\"text\":\"hey bob\",\"type\":\"image\",\"image\":\"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAgAAAAIAQMAAAD+wSzIAAAABlBMVEX///+/v7+jQ3Y5AAAADklEQVQI12P4AIX8EAgALgAD/aNpbtEAAAAASUVORK5CYII=\"}}")
       alice <# "#team > bob hi team"
       alice <## "      hey bob"
       alice <# "/f #team ./tests/fixtures/test.jpg"
@@ -3333,7 +3360,7 @@ testSetContactPrefs = testChat2 aliceProfile bobProfile $
     alice ##> "/_set prefs @2 {}"
     alice <## "your preferences for bob did not change"
     (bob </)
-    let startFeatures = [(0, "Full deletion: off"), (0, "Voice messages: off")]
+    let startFeatures = [(0, "Disappearing messages: off"), (0, "Full deletion: off"), (0, "Voice messages: off")]
     alice #$> ("/_get chat @2 count=100", chat, startFeatures)
     bob #$> ("/_get chat @2 count=100", chat, startFeatures)
     let sendVoice = "/_send @2 json {\"filePath\": \"test.txt\", \"msgContent\": {\"type\": \"voice\", \"text\": \"\", \"duration\": 10}}"
@@ -3405,8 +3432,8 @@ testUpdateGroupPrefs =
     \alice bob -> do
       createGroup2 "team" alice bob
       alice #$> ("/_get chat #1 count=100", chat, [(0, "connected")])
+      threadDelay 500000
       bob #$> ("/_get chat #1 count=100", chat, groupFeatures <> [(0, "connected")])
-      threadDelay 1000000
       alice ##> "/_group_profile #1 {\"displayName\": \"team\", \"fullName\": \"team\", \"groupPreferences\": {\"fullDelete\": {\"enable\": \"on\"}, \"directMessages\": {\"enable\": \"on\"}}}"
       alice <## "updated group preferences:"
       alice <## "Full deletion enabled: on"
@@ -3414,8 +3441,8 @@ testUpdateGroupPrefs =
       bob <## "alice updated group #team:"
       bob <## "updated group preferences:"
       bob <## "Full deletion enabled: on"
+      threadDelay 500000
       bob #$> ("/_get chat #1 count=100", chat, groupFeatures <> [(0, "connected"), (0, "Full deletion: on")])
-      threadDelay 1000000
       alice ##> "/_group_profile #1 {\"displayName\": \"team\", \"fullName\": \"team\", \"groupPreferences\": {\"fullDelete\": {\"enable\": \"off\"}, \"voice\": {\"enable\": \"off\"}, \"directMessages\": {\"enable\": \"on\"}}}"
       alice <## "updated group preferences:"
       alice <## "Full deletion enabled: off"
@@ -3425,8 +3452,8 @@ testUpdateGroupPrefs =
       bob <## "updated group preferences:"
       bob <## "Full deletion enabled: off"
       bob <## "Voice messages enabled: off"
+      threadDelay 500000
       bob #$> ("/_get chat #1 count=100", chat, groupFeatures <> [(0, "connected"), (0, "Full deletion: on"), (0, "Full deletion: off"), (0, "Voice messages: off")])
-      threadDelay 1000000
       -- alice ##> "/_group_profile #1 {\"displayName\": \"team\", \"fullName\": \"team\", \"groupPreferences\": {\"fullDelete\": {\"enable\": \"off\"}, \"voice\": {\"enable\": \"on\"}}}"
       alice ##> "/set voice #team on"
       alice <## "updated group preferences:"
@@ -3435,17 +3462,19 @@ testUpdateGroupPrefs =
       bob <## "alice updated group #team:"
       bob <## "updated group preferences:"
       bob <## "Voice messages enabled: on"
+      threadDelay 500000
       bob #$> ("/_get chat #1 count=100", chat, groupFeatures <> [(0, "connected"), (0, "Full deletion: on"), (0, "Full deletion: off"), (0, "Voice messages: off"), (0, "Voice messages: on")])
-      threadDelay 1000000
+      threadDelay 500000
       alice ##> "/_group_profile #1 {\"displayName\": \"team\", \"fullName\": \"team\", \"groupPreferences\": {\"fullDelete\": {\"enable\": \"off\"}, \"voice\": {\"enable\": \"on\"}, \"directMessages\": {\"enable\": \"on\"}}}"
       -- no update
+      threadDelay 500000
       alice #$> ("/_get chat #1 count=100", chat, [(0, "connected"), (1, "Full deletion: on"), (1, "Full deletion: off"), (1, "Voice messages: off"), (1, "Voice messages: on")])
-      threadDelay 1000000
       alice #> "#team hey"
       bob <# "#team alice> hey"
       threadDelay 1000000
       bob #> "#team hi"
       alice <# "#team bob> hi"
+      threadDelay 500000
       alice #$> ("/_get chat #1 count=100", chat, [(0, "connected"), (1, "Full deletion: on"), (1, "Full deletion: off"), (1, "Voice messages: off"), (1, "Voice messages: on"), (1, "hey"), (0, "hi")])
       bob #$> ("/_get chat #1 count=100", chat, groupFeatures <> [(0, "connected"), (0, "Full deletion: on"), (0, "Full deletion: off"), (0, "Voice messages: off"), (0, "Voice messages: on"), (0, "hey"), (1, "hi")])
 
@@ -3477,6 +3506,8 @@ testAllowFullDeletionGroup =
       bob <# "#team alice> hi"
       threadDelay 1000000
       bob #> "#team hey"
+      bob ##> "/last_item_id #team"
+      msgItemId <- getTermLine bob
       alice <# "#team bob> hey"
       alice ##> "/set delete #team on"
       alice <## "updated group preferences:"
@@ -3486,7 +3517,7 @@ testAllowFullDeletionGroup =
       bob <## "Full deletion enabled: on"
       alice #$> ("/_get chat #1 count=100", chat, [(0, "connected"), (1, "hi"), (0, "hey"), (1, "Full deletion: on")])
       bob #$> ("/_get chat #1 count=100", chat, groupFeatures <> [(0, "connected"), (0, "hi"), (1, "hey"), (0, "Full deletion: on")])
-      bob #$> ("/_delete item #1 " <> groupItemId 2 5 <> " broadcast", id, "message deleted")
+      bob #$> ("/_delete item #1 " <> msgItemId <> " broadcast", id, "message deleted")
       alice <# "#team bob> [deleted] hey"
       alice #$> ("/_get chat #1 count=100", chat, [(0, "connected"), (1, "hi"), (1, "Full deletion: on")])
       bob #$> ("/_get chat #1 count=100", chat, groupFeatures <> [(0, "connected"), (0, "hi"), (0, "Full deletion: on")])
@@ -3546,6 +3577,51 @@ testProhibitDirectMessages =
       cc <## "alice updated group #team:"
       cc <## "updated group preferences:"
       cc <## "Direct messages enabled: off"
+
+testEnableTimedMessagesContact :: IO ()
+testEnableTimedMessagesContact =
+  testChat2 aliceProfile bobProfile $
+    \alice bob -> do
+      connectUsers alice bob
+      alice ##> "/_set prefs @2 {\"timedMessages\": {\"allow\": \"yes\", \"ttl\": 1}}"
+      alice <## "you updated preferences for bob:"
+      alice <## "Disappearing messages: off (you allow: yes, after 1 sec, contact allows: no)"
+      bob <## "alice updated preferences for you:"
+      bob <## "Disappearing messages: off (you allow: no, contact allows: yes, after 1 sec)"
+      bob ##> "/set disappear @alice yes"
+      bob <## "you updated preferences for alice:"
+      bob <## "Disappearing messages: enabled (you allow: yes, after 1 sec, contact allows: yes, after 1 sec)"
+      alice <## "bob updated preferences for you:"
+      alice <## "Disappearing messages: enabled (you allow: yes, after 1 sec, contact allows: yes, after 1 sec)"
+      alice <##> bob
+      threadDelay 500000
+      alice #$> ("/_get chat @2 count=100", chat, chatFeatures <> [(0, "Disappearing messages: enabled, after 1 sec"), (1, "hi"), (0, "hey")])
+      bob #$> ("/_get chat @2 count=100", chat, chatFeatures <> [(1, "Disappearing messages: enabled, after 1 sec"), (0, "hi"), (1, "hey")])
+      threadDelay 1000000
+      alice #$> ("/_get chat @2 count=100", chat, chatFeatures <> [(0, "Disappearing messages: enabled, after 1 sec")])
+      bob #$> ("/_get chat @2 count=100", chat, chatFeatures <> [(1, "Disappearing messages: enabled, after 1 sec")])
+
+testEnableTimedMessagesGroup :: IO ()
+testEnableTimedMessagesGroup =
+  testChat2 aliceProfile bobProfile $
+    \alice bob -> do
+      createGroup2 "team" alice bob
+      threadDelay 1000000
+      alice ##> "/_group_profile #1 {\"displayName\": \"team\", \"fullName\": \"team\", \"groupPreferences\": {\"timedMessages\": {\"enable\": \"on\", \"ttl\": 1}, \"directMessages\": {\"enable\": \"on\"}}}"
+      alice <## "updated group preferences:"
+      alice <## "Disappearing messages enabled: on, after 1 sec"
+      bob <## "alice updated group #team:"
+      bob <## "updated group preferences:"
+      bob <## "Disappearing messages enabled: on, after 1 sec"
+      threadDelay 1000000
+      alice #> "#team hi"
+      bob <# "#team alice> hi"
+      threadDelay 500000
+      alice #$> ("/_get chat #1 count=100", chat, [(0, "connected"), (1, "Disappearing messages: on, after 1 sec"), (1, "hi")])
+      bob #$> ("/_get chat #1 count=100", chat, groupFeatures <> [(0, "connected"), (0, "Disappearing messages: on, after 1 sec"), (0, "hi")])
+      threadDelay 1000000
+      alice #$> ("/_get chat #1 count=100", chat, [(0, "connected"), (1, "Disappearing messages: on, after 1 sec")])
+      bob #$> ("/_get chat #1 count=100", chat, groupFeatures <> [(0, "connected"), (0, "Disappearing messages: on, after 1 sec")])
 
 testGetSetSMPServers :: IO ()
 testGetSetSMPServers =
@@ -3930,24 +4006,17 @@ testNegotiateCall =
     bob #$> ("/_get chat @2 count=100", chat, chatFeatures <> [(0, "incoming call: accepted")])
     alice <## "bob accepted your WebRTC video call (e2e encrypted)"
     repeatM_ 3 $ getTermLine alice
-    alice <## "message updated" -- call chat item updated
     alice #$> ("/_get chat @2 count=100", chat, chatFeatures <> [(1, "outgoing call: accepted")])
     -- alice confirms call by sending WebRTC answer
     alice ##> ("/_call answer @2 " <> serialize testWebRTCSession)
-    alice
-      <### [ "ok",
-             "message updated"
-           ]
+    alice <## "ok"
     alice #$> ("/_get chat @2 count=100", chat, chatFeatures <> [(1, "outgoing call: connecting...")])
     bob <## "alice continued the WebRTC call"
     repeatM_ 3 $ getTermLine bob
     bob #$> ("/_get chat @2 count=100", chat, chatFeatures <> [(0, "incoming call: connecting...")])
     -- participants can update calls as connected
     alice ##> "/_call status @2 connected"
-    alice
-      <### [ "ok",
-             "message updated"
-           ]
+    alice <## "ok"
     alice #$> ("/_get chat @2 count=100", chat, chatFeatures <> [(1, "outgoing call: in progress (00:00)")])
     bob ##> "/_call status @2 connected"
     bob <## "ok"
@@ -3957,7 +4026,6 @@ testNegotiateCall =
     bob <## "ok"
     bob #$> ("/_get chat @2 count=100", chat, chatFeatures <> [(0, "incoming call: ended (00:00)")])
     alice <## "call with bob ended"
-    alice <## "message updated"
     alice #$> ("/_get chat @2 count=100", chat, chatFeatures <> [(1, "outgoing call: ended (00:00)")])
 
 testMaintenanceMode :: IO ()
@@ -4866,19 +4934,16 @@ chatFeaturesF :: [((Int, String), Maybe String)]
 chatFeaturesF = map (\(a, _, c) -> (a, c)) chatFeatures''
 
 chatFeatures'' :: [((Int, String), Maybe (Int, String), Maybe String)]
-chatFeatures'' = [((0, "Full deletion: off"), Nothing, Nothing), ((0, "Voice messages: enabled"), Nothing, Nothing)]
+chatFeatures'' = [((0, "Disappearing messages: off"), Nothing, Nothing), ((0, "Full deletion: off"), Nothing, Nothing), ((0, "Voice messages: enabled"), Nothing, Nothing)]
 
 groupFeatures :: [(Int, String)]
 groupFeatures = map (\(a, _, _) -> a) groupFeatures''
 
 groupFeatures'' :: [((Int, String), Maybe (Int, String), Maybe String)]
-groupFeatures'' = [((0, "Direct messages: on"), Nothing, Nothing), ((0, "Full deletion: off"), Nothing, Nothing), ((0, "Voice messages: on"), Nothing, Nothing)]
+groupFeatures'' = [((0, "Disappearing messages: off"), Nothing, Nothing), ((0, "Direct messages: on"), Nothing, Nothing), ((0, "Full deletion: off"), Nothing, Nothing), ((0, "Voice messages: on"), Nothing, Nothing)]
 
 itemId :: Int -> String
 itemId i = show $ length chatFeatures + i
-
-groupItemId :: Int -> Int -> String
-groupItemId n i = show $ length chatFeatures * n + i
 
 (@@@) :: TestCC -> [(String, String)] -> Expectation
 (@@@) = getChats . map $ \(ldn, msg, _) -> (ldn, msg)
@@ -5014,3 +5079,8 @@ getContactProfiles cc = do
     Just user -> do
       profiles <- withTransaction (chatStore $ chatController cc) $ \db -> getUserContactProfiles db user
       pure $ map (\Profile {displayName} -> displayName) profiles
+
+lastItemId :: TestCC -> IO String
+lastItemId cc = do
+  cc ##> "/last_item_id"
+  getTermLine cc

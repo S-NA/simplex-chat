@@ -39,13 +39,23 @@ import Simplex.Messaging.Protocol (MsgBody)
 import Simplex.Messaging.Util (eitherToMaybe, safeDecodeUtf8, (<$?>))
 
 data ChatType = CTDirect | CTGroup | CTContactRequest | CTContactConnection
-  deriving (Show, Generic)
+  deriving (Eq, Show, Ord, Generic)
 
 data ChatName = ChatName ChatType Text
   deriving (Show)
 
+chatTypeStr :: ChatType -> String
+chatTypeStr = \case
+  CTDirect -> "@"
+  CTGroup -> "#"
+  CTContactRequest -> "<@"
+  CTContactConnection -> ":"
+
+chatNameStr :: ChatName -> String
+chatNameStr (ChatName cType name) = chatTypeStr cType <> T.unpack name
+
 data ChatRef = ChatRef ChatType Int64
-  deriving (Show)
+  deriving (Eq, Show, Ord)
 
 instance ToJSON ChatType where
   toJSON = J.genericToJSON . enumJSON $ dropPrefix "CT"
@@ -65,6 +75,13 @@ chatInfoUpdatedAt = \case
   GroupChat GroupInfo {updatedAt} -> updatedAt
   ContactRequest UserContactRequest {updatedAt} -> updatedAt
   ContactConnection PendingContactConnection {updatedAt} -> updatedAt
+
+chatInfoToRef :: ChatInfo c -> ChatRef
+chatInfoToRef = \case
+  DirectChat Contact {contactId} -> ChatRef CTDirect contactId
+  GroupChat GroupInfo {groupId} -> ChatRef CTGroup groupId
+  ContactRequest UserContactRequest {contactRequestId} -> ChatRef CTContactRequest contactRequestId
+  ContactConnection PendingContactConnection {pccConnId} -> ChatRef CTContactConnection pccConnId
 
 data JSONChatInfo
   = JCInfoDirect {contact :: Contact}
@@ -157,6 +174,9 @@ chatItemTs (CChatItem _ ci) = chatItemTs' ci
 chatItemTs' :: ChatItem c d -> UTCTime
 chatItemTs' ChatItem {meta = CIMeta {itemTs}} = itemTs
 
+chatItemTimed :: ChatItem c d -> Maybe CITimed
+chatItemTimed ChatItem {meta = CIMeta {itemTimed}} = itemTimed
+
 data ChatDirection (c :: ChatType) (d :: MsgDirection) where
   CDDirectSnd :: Contact -> ChatDirection 'CTDirect 'MDSnd
   CDDirectRcv :: Contact -> ChatDirection 'CTDirect 'MDRcv
@@ -238,6 +258,9 @@ aChatItems (AChat ct Chat {chatInfo, chatItems}) = map aChatItem chatItems
   where
     aChatItem (CChatItem md ci) = AChatItem ct md chatInfo ci
 
+aChatItemId :: AChatItem -> Int64
+aChatItemId (AChatItem _ _ _ ci) = chatItemId' ci
+
 updateFileStatus :: forall c d. ChatItem c d -> CIFileStatus d -> ChatItem c d
 updateFileStatus ci@ChatItem {file} status = case file of
   Just f -> ci {file = Just (f :: CIFile d) {fileStatus = status}}
@@ -256,6 +279,8 @@ data CIMeta (d :: MsgDirection) = CIMeta
     itemSharedMsgId :: Maybe SharedMsgId,
     itemDeleted :: Bool,
     itemEdited :: Bool,
+    itemTimed :: Maybe CITimed,
+    itemLive :: Maybe Bool,
     editable :: Bool,
     localItemTs :: ZonedTime,
     createdAt :: UTCTime,
@@ -263,15 +288,47 @@ data CIMeta (d :: MsgDirection) = CIMeta
   }
   deriving (Show, Generic)
 
-mkCIMeta :: ChatItemId -> CIContent d -> Text -> CIStatus d -> Maybe SharedMsgId -> Bool -> Bool -> TimeZone -> UTCTime -> ChatItemTs -> UTCTime -> UTCTime -> CIMeta d
-mkCIMeta itemId itemContent itemText itemStatus itemSharedMsgId itemDeleted itemEdited tz currentTs itemTs createdAt updatedAt =
+mkCIMeta :: ChatItemId -> CIContent d -> Text -> CIStatus d -> Maybe SharedMsgId -> Bool -> Bool -> Maybe CITimed -> Maybe Bool -> TimeZone -> UTCTime -> ChatItemTs -> UTCTime -> UTCTime -> CIMeta d
+mkCIMeta itemId itemContent itemText itemStatus itemSharedMsgId itemDeleted itemEdited itemTimed itemLive tz currentTs itemTs createdAt updatedAt =
   let localItemTs = utcToZonedTime tz itemTs
       editable = case itemContent of
         CISndMsgContent _ -> diffUTCTime currentTs itemTs < nominalDay && not itemDeleted
         _ -> False
-   in CIMeta {itemId, itemTs, itemText, itemStatus, itemSharedMsgId, itemDeleted, itemEdited, editable, localItemTs, createdAt, updatedAt}
+   in CIMeta {itemId, itemTs, itemText, itemStatus, itemSharedMsgId, itemDeleted, itemEdited, itemTimed, itemLive, editable, localItemTs, createdAt, updatedAt}
 
 instance ToJSON (CIMeta d) where toEncoding = J.genericToEncoding J.defaultOptions
+
+data CITimed = CITimed
+  { ttl :: Int, -- seconds
+    deleteAt :: Maybe UTCTime
+  }
+  deriving (Show, Generic)
+
+instance ToJSON CITimed where toEncoding = J.genericToEncoding J.defaultOptions
+
+ttl' :: CITimed -> Int
+ttl' CITimed {ttl} = ttl
+
+contactTimedTTL :: Contact -> Maybe Int
+contactTimedTTL Contact {mergedPreferences = ContactUserPreferences {timedMessages = ContactUserPreference {enabled, userPreference}}}
+  | forUser enabled && forContact enabled = ttl
+  | otherwise = Nothing
+  where
+    TimedMessagesPreference {ttl} = preference (userPreference :: ContactUserPref TimedMessagesPreference)
+
+groupTimedTTL :: GroupInfo -> Maybe Int
+groupTimedTTL GroupInfo {fullGroupPreferences = FullGroupPreferences {timedMessages = TimedMessagesGroupPreference {enable, ttl}}}
+  | enable == FEOn = Just ttl
+  | otherwise = Nothing
+
+rcvContactCITimed :: Contact -> Maybe Int -> Maybe CITimed
+rcvContactCITimed = rcvCITimed_ . contactTimedTTL
+
+rcvGroupCITimed :: GroupInfo -> Maybe Int -> Maybe CITimed
+rcvGroupCITimed = rcvCITimed_ . groupTimedTTL
+
+rcvCITimed_ :: Maybe Int -> Maybe Int -> Maybe CITimed
+rcvCITimed_ chatTTL itemTTL = (`CITimed` Nothing) <$> (chatTTL >> itemTTL)
 
 data CIQuote (c :: ChatType) = CIQuote
   { chatDir :: CIQDirection c,
@@ -558,10 +615,10 @@ data CIContent (d :: MsgDirection) where
   CISndGroupEvent :: SndGroupEvent -> CIContent 'MDSnd
   CIRcvConnEvent :: RcvConnEvent -> CIContent 'MDRcv
   CISndConnEvent :: SndConnEvent -> CIContent 'MDSnd
-  CIRcvChatFeature :: ChatFeature -> PrefEnabled -> CIContent 'MDRcv
-  CISndChatFeature :: ChatFeature -> PrefEnabled -> CIContent 'MDSnd
-  CIRcvGroupFeature :: GroupFeature -> GroupPreference -> CIContent 'MDRcv
-  CISndGroupFeature :: GroupFeature -> GroupPreference -> CIContent 'MDSnd
+  CIRcvChatFeature :: ChatFeature -> PrefEnabled -> Maybe Int -> CIContent 'MDRcv
+  CISndChatFeature :: ChatFeature -> PrefEnabled -> Maybe Int -> CIContent 'MDSnd
+  CIRcvGroupFeature :: GroupFeature -> GroupPreference -> Maybe Int -> CIContent 'MDRcv
+  CISndGroupFeature :: GroupFeature -> GroupPreference -> Maybe Int -> CIContent 'MDSnd
   CIRcvChatFeatureRejected :: ChatFeature -> CIContent 'MDRcv
   CIRcvGroupFeatureRejected :: GroupFeature -> CIContent 'MDRcv
 -- ^ This type is used both in API and in DB, so we use different JSON encodings for the database and for the API
@@ -750,10 +807,10 @@ ciContentToText = \case
   CISndGroupEvent event -> sndGroupEventToText event
   CIRcvConnEvent event -> rcvConnEventToText event
   CISndConnEvent event -> sndConnEventToText event
-  CIRcvChatFeature feature enabled -> chatFeatureToText feature <> ": " <> prefEnabledToText enabled
-  CISndChatFeature feature enabled -> chatFeatureToText feature <> ": " <> prefEnabledToText enabled
-  CIRcvGroupFeature feature pref -> groupFeatureToText feature <> ": " <> groupPrefToText pref
-  CISndGroupFeature feature pref -> groupFeatureToText feature <> ": " <> groupPrefToText pref
+  CIRcvChatFeature feature enabled param -> chatFeatureToText feature <> ": " <> prefToText enabled param
+  CISndChatFeature feature enabled param -> chatFeatureToText feature <> ": " <> prefToText enabled param
+  CIRcvGroupFeature feature pref param -> groupFeatureToText feature <> ": " <> groupPrefToText pref param
+  CISndGroupFeature feature pref param -> groupFeatureToText feature <> ": " <> groupPrefToText pref param
   CIRcvChatFeatureRejected feature -> chatFeatureToText feature <> ": received, prohibited"
   CIRcvGroupFeatureRejected feature -> groupFeatureToText feature <> ": received, prohibited"
 
@@ -806,10 +863,10 @@ data JSONCIContent
   | JCISndGroupEvent {sndGroupEvent :: SndGroupEvent}
   | JCIRcvConnEvent {rcvConnEvent :: RcvConnEvent}
   | JCISndConnEvent {sndConnEvent :: SndConnEvent}
-  | JCIRcvChatFeature {feature :: ChatFeature, enabled :: PrefEnabled}
-  | JCISndChatFeature {feature :: ChatFeature, enabled :: PrefEnabled}
-  | JCIRcvGroupFeature {groupFeature :: GroupFeature, preference :: GroupPreference}
-  | JCISndGroupFeature {groupFeature :: GroupFeature, preference :: GroupPreference}
+  | JCIRcvChatFeature {feature :: ChatFeature, enabled :: PrefEnabled, param :: Maybe Int}
+  | JCISndChatFeature {feature :: ChatFeature, enabled :: PrefEnabled, param :: Maybe Int}
+  | JCIRcvGroupFeature {groupFeature :: GroupFeature, preference :: GroupPreference, param :: Maybe Int}
+  | JCISndGroupFeature {groupFeature :: GroupFeature, preference :: GroupPreference, param :: Maybe Int}
   | JCIRcvChatFeatureRejected {feature :: ChatFeature}
   | JCIRcvGroupFeatureRejected {groupFeature :: GroupFeature}
   deriving (Generic)
@@ -836,10 +893,10 @@ jsonCIContent = \case
   CISndGroupEvent sndGroupEvent -> JCISndGroupEvent {sndGroupEvent}
   CIRcvConnEvent rcvConnEvent -> JCIRcvConnEvent {rcvConnEvent}
   CISndConnEvent sndConnEvent -> JCISndConnEvent {sndConnEvent}
-  CIRcvChatFeature feature enabled -> JCIRcvChatFeature {feature, enabled}
-  CISndChatFeature feature enabled -> JCISndChatFeature {feature, enabled}
-  CIRcvGroupFeature groupFeature preference -> JCIRcvGroupFeature {groupFeature, preference}
-  CISndGroupFeature groupFeature preference -> JCISndGroupFeature {groupFeature, preference}
+  CIRcvChatFeature feature enabled param -> JCIRcvChatFeature {feature, enabled, param}
+  CISndChatFeature feature enabled param -> JCISndChatFeature {feature, enabled, param}
+  CIRcvGroupFeature groupFeature preference param -> JCIRcvGroupFeature {groupFeature, preference, param}
+  CISndGroupFeature groupFeature preference param -> JCISndGroupFeature {groupFeature, preference, param}
   CIRcvChatFeatureRejected feature -> JCIRcvChatFeatureRejected {feature}
   CIRcvGroupFeatureRejected groupFeature -> JCIRcvGroupFeatureRejected {groupFeature}
 
@@ -858,10 +915,10 @@ aciContentJSON = \case
   JCISndGroupEvent {sndGroupEvent} -> ACIContent SMDSnd $ CISndGroupEvent sndGroupEvent
   JCIRcvConnEvent {rcvConnEvent} -> ACIContent SMDRcv $ CIRcvConnEvent rcvConnEvent
   JCISndConnEvent {sndConnEvent} -> ACIContent SMDSnd $ CISndConnEvent sndConnEvent
-  JCIRcvChatFeature {feature, enabled} -> ACIContent SMDRcv $ CIRcvChatFeature feature enabled
-  JCISndChatFeature {feature, enabled} -> ACIContent SMDSnd $ CISndChatFeature feature enabled
-  JCIRcvGroupFeature {groupFeature, preference} -> ACIContent SMDRcv $ CIRcvGroupFeature groupFeature preference
-  JCISndGroupFeature {groupFeature, preference} -> ACIContent SMDSnd $ CISndGroupFeature groupFeature preference
+  JCIRcvChatFeature {feature, enabled, param} -> ACIContent SMDRcv $ CIRcvChatFeature feature enabled param
+  JCISndChatFeature {feature, enabled, param} -> ACIContent SMDSnd $ CISndChatFeature feature enabled param
+  JCIRcvGroupFeature {groupFeature, preference, param} -> ACIContent SMDRcv $ CIRcvGroupFeature groupFeature preference param
+  JCISndGroupFeature {groupFeature, preference, param} -> ACIContent SMDSnd $ CISndGroupFeature groupFeature preference param
   JCIRcvChatFeatureRejected {feature} -> ACIContent SMDRcv $ CIRcvChatFeatureRejected feature
   JCIRcvGroupFeatureRejected {groupFeature} -> ACIContent SMDRcv $ CIRcvGroupFeatureRejected groupFeature
 
@@ -880,10 +937,10 @@ data DBJSONCIContent
   | DBJCISndGroupEvent {sndGroupEvent :: DBSndGroupEvent}
   | DBJCIRcvConnEvent {rcvConnEvent :: DBRcvConnEvent}
   | DBJCISndConnEvent {sndConnEvent :: DBSndConnEvent}
-  | DBJCIRcvChatFeature {feature :: ChatFeature, enabled :: PrefEnabled}
-  | DBJCISndChatFeature {feature :: ChatFeature, enabled :: PrefEnabled}
-  | DBJCIRcvGroupFeature {groupFeature :: GroupFeature, preference :: GroupPreference}
-  | DBJCISndGroupFeature {groupFeature :: GroupFeature, preference :: GroupPreference}
+  | DBJCIRcvChatFeature {feature :: ChatFeature, enabled :: PrefEnabled, param :: Maybe Int}
+  | DBJCISndChatFeature {feature :: ChatFeature, enabled :: PrefEnabled, param :: Maybe Int}
+  | DBJCIRcvGroupFeature {groupFeature :: GroupFeature, preference :: GroupPreference, param :: Maybe Int}
+  | DBJCISndGroupFeature {groupFeature :: GroupFeature, preference :: GroupPreference, param :: Maybe Int}
   | DBJCIRcvChatFeatureRejected {feature :: ChatFeature}
   | DBJCIRcvGroupFeatureRejected {groupFeature :: GroupFeature}
   deriving (Generic)
@@ -910,10 +967,10 @@ dbJsonCIContent = \case
   CISndGroupEvent sge -> DBJCISndGroupEvent $ SGE sge
   CIRcvConnEvent rce -> DBJCIRcvConnEvent $ RCE rce
   CISndConnEvent sce -> DBJCISndConnEvent $ SCE sce
-  CIRcvChatFeature feature enabled -> DBJCIRcvChatFeature {feature, enabled}
-  CISndChatFeature feature enabled -> DBJCISndChatFeature {feature, enabled}
-  CIRcvGroupFeature groupFeature preference -> DBJCIRcvGroupFeature {groupFeature, preference}
-  CISndGroupFeature groupFeature preference -> DBJCISndGroupFeature {groupFeature, preference}
+  CIRcvChatFeature feature enabled param -> DBJCIRcvChatFeature {feature, enabled, param}
+  CISndChatFeature feature enabled param -> DBJCISndChatFeature {feature, enabled, param}
+  CIRcvGroupFeature groupFeature preference param -> DBJCIRcvGroupFeature {groupFeature, preference, param}
+  CISndGroupFeature groupFeature preference param -> DBJCISndGroupFeature {groupFeature, preference, param}
   CIRcvChatFeatureRejected feature -> DBJCIRcvChatFeatureRejected {feature}
   CIRcvGroupFeatureRejected groupFeature -> DBJCIRcvGroupFeatureRejected {groupFeature}
 
@@ -932,10 +989,10 @@ aciContentDBJSON = \case
   DBJCISndGroupEvent (SGE sge) -> ACIContent SMDSnd $ CISndGroupEvent sge
   DBJCIRcvConnEvent (RCE rce) -> ACIContent SMDRcv $ CIRcvConnEvent rce
   DBJCISndConnEvent (SCE sce) -> ACIContent SMDSnd $ CISndConnEvent sce
-  DBJCIRcvChatFeature {feature, enabled} -> ACIContent SMDRcv $ CIRcvChatFeature feature enabled
-  DBJCISndChatFeature {feature, enabled} -> ACIContent SMDSnd $ CISndChatFeature feature enabled
-  DBJCIRcvGroupFeature {groupFeature, preference} -> ACIContent SMDRcv $ CIRcvGroupFeature groupFeature preference
-  DBJCISndGroupFeature {groupFeature, preference} -> ACIContent SMDSnd $ CISndGroupFeature groupFeature preference
+  DBJCIRcvChatFeature {feature, enabled, param} -> ACIContent SMDRcv $ CIRcvChatFeature feature enabled param
+  DBJCISndChatFeature {feature, enabled, param} -> ACIContent SMDSnd $ CISndChatFeature feature enabled param
+  DBJCIRcvGroupFeature {groupFeature, preference, param} -> ACIContent SMDRcv $ CIRcvGroupFeature groupFeature preference param
+  DBJCISndGroupFeature {groupFeature, preference, param} -> ACIContent SMDSnd $ CISndGroupFeature groupFeature preference param
   DBJCIRcvChatFeatureRejected {feature} -> ACIContent SMDRcv $ CIRcvChatFeatureRejected feature
   DBJCIRcvGroupFeatureRejected {groupFeature} -> ACIContent SMDRcv $ CIRcvGroupFeatureRejected groupFeature
 

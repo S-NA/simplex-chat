@@ -292,6 +292,7 @@
                 extra-modules = [{
                   packages.simplexmq.flags.swift = true;
                   packages.direct-sqlcipher.flags.commoncrypto = true;
+                  packages.entropy.patches = [ ./scripts/nix/entropy.patch ];
                 }];
               }).simplex-chat.components.library.override (
                 iosOverrides "pkg-ios-aarch64-swift-json"
@@ -301,6 +302,7 @@
                 pkgs' = pkgs;
                 extra-modules = [{
                   packages.direct-sqlcipher.flags.commoncrypto = true;
+                  packages.entropy.patches = [ ./scripts/nix/entropy.patch ];
                 }];
               }).simplex-chat.components.library.override (
                 iosOverrides "pkg-ios-aarch64-tagged-json"
@@ -313,6 +315,7 @@
                 extra-modules = [{
                   packages.simplexmq.flags.swift = true;
                   packages.direct-sqlcipher.flags.commoncrypto = true;
+                  packages.entropy.patches = [ ./scripts/nix/entropy.patch ];
                 }];
               }).simplex-chat.components.library.override (
                 iosOverrides "pkg-ios-x86_64-swift-json"
@@ -322,6 +325,7 @@
                 pkgs' = pkgs;
                 extra-modules = [{
                   packages.direct-sqlcipher.flags.commoncrypto = true;
+                  packages.entropy.patches = [ ./scripts/nix/entropy.patch ];
                 }];
               }).simplex-chat.components.library.override (
                 iosOverrides "pkg-ios-x86_64-tagged-json"
