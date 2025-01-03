@@ -1,0 +1,57 @@
+name: build-static
+
+on:
+  push:
+    branches: [master-static, stable-static]
+
+env:
+  GITHUB_TOKEN: ${{ secrets.NO_RATE_LIMIT_TOKEN }}
+
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write
+    steps:
+    - uses: actions/checkout@v4
+
+    - uses: nixbuild/nix-quick-install-action@v29
+      with:
+        nix_conf: |
+          trusted-public-keys = cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY= hydra.iohk.io:f/Ea+s+dFdN+3Y/G+FDgSq+a5NEWhJGzdjvKNGv0/EQ= loony-tools:pr9m4BkM/5/eSTZlkQyRt57Jz7OMBxNSUiMC4FkcNfk=
+          substituters = https://cache.nixos.org https://cache.iog.io https://cache.zw3rk.com
+
+    - name: Restore and save Nix store
+      uses: nix-community/cache-nix-action@v5
+      with:
+        primary-key: build-${{ runner.os }}-${{ hashFiles('flake.nix', 'flake.lock') }}
+        purge: true
+        purge-prefixes: build-${{ runner.os }}-
+        purge-created: 0
+        purge-primary-key: never
+
+    - run: |
+       nix build .#x86_64-linux-static:exe:simplex-chat
+       echo "x86_64_PATH=$(readlink -f result/bin/*)" >> $GITHUB_ENV
+
+    # Broken: iserv-proxy-interpreter: Failed to lookup symbol: __extenddftf2
+    # Grab patches from newer haskell.nix that fixes this later (do they exist?)
+    # - run: |
+    #    nix build --override-input haskellNix github:input-output-hk/haskell.nix/hkm/nixpkgs-update .#aarch64-linux-static:exe:simplex-chat
+    #    echo "aarch64_PATH=$(readlink -f result/bin/*)" >> $GITHUB_ENV
+
+    - run: |
+       mkdir build-artifacts
+       cp $x86_64_PATH build-artifacts/simplex-chat-x86_64-linux
+       # cp $aarch64_PATH build-artifacts/simplex-chat-aarch64-linux
+       echo "UPLOAD_PATH=$(readlink -f build-artifacts)" >> $GITHUB_ENV
+
+    - run: sha256sum ${{ env.UPLOAD_PATH }}/*
+    
+    - uses: actions/upload-artifact@v4
+      with:
+        name: static-simplex-chat-artifacts
+        path: ${{ env.UPLOAD_PATH }}
+
