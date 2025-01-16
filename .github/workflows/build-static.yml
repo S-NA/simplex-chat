@@ -21,7 +21,7 @@ jobs:
       with:
         nix_conf: |
           trusted-public-keys = cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY= hydra.iohk.io:f/Ea+s+dFdN+3Y/G+FDgSq+a5NEWhJGzdjvKNGv0/EQ= loony-tools:pr9m4BkM/5/eSTZlkQyRt57Jz7OMBxNSUiMC4FkcNfk=
-          substituters = https://cache.nixos.org https://cache.iog.io https://cache.zw3rk.com
+          substituters = https://cache.nixos.org https://cache.iog.io?priority=41 https://cache.zw3rk.com?priority=42
 
     - name: Restore and save Nix store
       uses: nix-community/cache-nix-action@v5
@@ -33,7 +33,7 @@ jobs:
         purge-primary-key: never
 
     - run: |
-       nix build .#x86_64-linux-static:exe:simplex-chat
+       nix build --fallback .#x86_64-linux-static:exe:simplex-chat
        echo "x86_64_PATH=$(readlink -f result/bin/*)" >> $GITHUB_ENV
 
     # Broken: iserv-proxy-interpreter: Failed to lookup symbol: __extenddftf2
