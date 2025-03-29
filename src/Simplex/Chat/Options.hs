@@ -14,12 +14,12 @@ module Simplex.Chat.Options
     getChatOpts,
     protocolServersP,
     defaultHostMode,
+    printDbOpts,
   )
 where
 
 import Control.Logger.Simple (LogLevel (..))
 import qualified Data.Attoparsec.ByteString.Char8 as A
-import Data.ByteArray (ScrubbedBytes)
 import qualified Data.ByteString.Char8 as B
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
@@ -34,11 +34,10 @@ import Simplex.Messaging.Encoding.String
 import Simplex.Messaging.Parsers (parseAll)
 import Simplex.Messaging.Protocol (ProtoServerWithAuth, ProtocolTypeI, SMPServerWithAuth, XFTPServerWithAuth)
 import Simplex.Messaging.Transport.Client (SocksProxyWithAuth (..), SocksAuth (..), defaultSocksProxyWithAuth)
-import System.FilePath (combine)
+import Simplex.Chat.Options.DB
 
 data ChatOpts = ChatOpts
   { coreOptions :: CoreChatOpts,
-    deviceName :: Maybe Text,
     chatCmd :: String,
     chatCmdDelay :: Int,
     chatCmdLog :: ChatCmdLog,
@@ -54,8 +53,7 @@ data ChatOpts = ChatOpts
   }
 
 data CoreChatOpts = CoreChatOpts
-  { dbFilePrefix :: String,
-    dbKey :: ScrubbedBytes,
+  { dbOptions :: ChatDbOpts,
     smpServers :: [SMPServerWithAuth],
     xftpServers :: [XFTPServerWithAuth],
     simpleNetCfg :: SimpleNetCfg,
@@ -65,6 +63,7 @@ data CoreChatOpts = CoreChatOpts
     logAgent :: Maybe LogLevel,
     logFile :: Maybe FilePath,
     tbqSize :: Natural,
+    deviceName :: Maybe Text,
     highlyAvailable :: Bool,
     yesToUpMigrations :: Bool
   }
@@ -81,24 +80,8 @@ agentLogLevel = \case
   CLLImportant -> LogInfo
 
 coreChatOptsP :: FilePath -> FilePath -> Parser CoreChatOpts
-coreChatOptsP appDir defaultDbFileName = do
-  dbFilePrefix <-
-    strOption
-      ( long "database"
-          <> short 'd'
-          <> metavar "DB_FILE"
-          <> help "Path prefix to chat and agent database files"
-          <> value defaultDbFilePath
-          <> showDefault
-      )
-  dbKey <-
-    strOption
-      ( long "key"
-          <> short 'k'
-          <> metavar "KEY"
-          <> help "Database encryption key/pass-phrase"
-          <> value ""
-      )
+coreChatOptsP appDir defaultDbName = do
+  dbOptions <- chatDbOptsP appDir defaultDbName
   smpServers <-
     option
       parseProtocolServers
@@ -229,6 +212,13 @@ coreChatOptsP appDir defaultDbFileName = do
           <> value 1024
           <> showDefault
       )
+  deviceName <-
+    optional $
+      strOption
+        ( long "device-name"
+            <> metavar "DEVICE"
+            <> help "Device name to use in connections with remote hosts and controller"
+        )
   highlyAvailable <-
     switch
       ( long "ha"
@@ -242,8 +232,7 @@ coreChatOptsP appDir defaultDbFileName = do
       )
   pure
     CoreChatOpts
-      { dbFilePrefix,
-        dbKey,
+      { dbOptions,
         smpServers,
         xftpServers,
         simpleNetCfg =
@@ -264,12 +253,12 @@ coreChatOptsP appDir defaultDbFileName = do
         logAgent = if logAgent || logLevel == CLLDebug then Just $ agentLogLevel logLevel else Nothing,
         logFile,
         tbqSize,
+        deviceName,
         highlyAvailable,
         yesToUpMigrations
       }
   where
     useTcpTimeout p t = 1000000 * if t > 0 then t else maybe 7 (const 15) p
-    defaultDbFilePath = combine appDir defaultDbFileName
 
 defaultHostMode :: Maybe SocksProxyWithAuth -> HostMode
 defaultHostMode = \case
@@ -277,15 +266,8 @@ defaultHostMode = \case
   _ -> HMPublic
 
 chatOptsP :: FilePath -> FilePath -> Parser ChatOpts
-chatOptsP appDir defaultDbFileName = do
-  coreOptions <- coreChatOptsP appDir defaultDbFileName
-  deviceName <-
-    optional $
-      strOption
-        ( long "device-name"
-            <> metavar "DEVICE"
-            <> help "Device name to use in connections with remote hosts and controller"
-        )
+chatOptsP appDir defaultDbName = do
+  coreOptions <- coreChatOptsP appDir defaultDbName
   chatCmd <-
     strOption
       ( long "execute"
@@ -375,7 +357,6 @@ chatOptsP appDir defaultDbFileName = do
   pure
     ChatOpts
       { coreOptions,
-        deviceName,
         chatCmd,
         chatCmdDelay,
         chatCmdLog,
@@ -425,12 +406,15 @@ parseChatCmdLog = eitherReader $ \case
   _ -> Left "Invalid chat command log level"
 
 getChatOpts :: FilePath -> FilePath -> IO ChatOpts
-getChatOpts appDir defaultDbFileName =
+getChatOpts appDir defaultDbName =
   execParser $
     info
-      (helper <*> versionOption <*> chatOptsP appDir defaultDbFileName)
+      (helper <*> versionOption <*> chatOptsP appDir defaultDbName)
       (header versionStr <> fullDesc <> progDesc "Start chat with DB_FILE file and use SERVER as SMP server")
   where
     versionStr = versionString versionNumber
     versionOption = infoOption versionAndUpdate (long "version" <> short 'v' <> help "Show version")
     versionAndUpdate = versionStr <> "\n" <> updateStr
+
+printDbOpts :: CoreChatOpts -> IO ()
+printDbOpts opts = putStrLn $ "db: " <> dbString (dbOptions opts)

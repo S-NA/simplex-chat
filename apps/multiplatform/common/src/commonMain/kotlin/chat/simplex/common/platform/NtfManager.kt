@@ -39,7 +39,7 @@ abstract class NtfManager {
   fun notifyMessageReceived(rhId: Long?, user: UserLike, cInfo: ChatInfo, cItem: ChatItem) {
     if (
       cItem.showNotification &&
-      cInfo.ntfsEnabled &&
+      cInfo.ntfsEnabled(cItem) &&
       (
           allowedToShowNotification() ||
               chatModel.chatId.value != cInfo.id ||
@@ -134,7 +134,12 @@ abstract class NtfManager {
       }
       res
     } else {
-      cItem.text
+      val mc = cItem.content.msgContent
+      if (mc is MsgContent.MCReport) {
+        generalGetString(MR.strings.notification_group_report).format(cItem.text.ifEmpty { mc.reason.text })
+      } else {
+        cItem.text
+      }
     }
   }
 }

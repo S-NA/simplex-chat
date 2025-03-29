@@ -14,8 +14,11 @@ import dev.icerock.moko.resources.compose.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.desktop.ui.tooling.preview.Preview
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import chat.simplex.common.model.ChatController.appPrefs
+import chat.simplex.common.model.ChatModel
 import chat.simplex.common.model.*
 import chat.simplex.common.model.ChatController.setConditionsNotified
 import chat.simplex.common.model.ServerOperator.Companion.dummyOperatorInfo
@@ -158,15 +161,28 @@ fun ModalData.WhatsNewView(updatedConditions: Boolean = false, viaSettings: Bool
       }
 
       if (updatedConditions) {
-        Text(
-          stringResource(MR.strings.view_updated_conditions),
-          color = MaterialTheme.colors.primary,
-          modifier = Modifier.clickable {
-            modalManager.showModalCloseable {
-              close -> UsageConditionsView(userServers = mutableStateOf(emptyList()), currUserServers = mutableStateOf(emptyList()), close = close, rhId = rhId)
+        Row(
+          modifier = Modifier
+            .clip(shape = CircleShape)
+            .clickable {
+              modalManager.showModalCloseable { close ->
+                UsageConditionsView(
+                  userServers = mutableStateOf(emptyList()),
+                  currUserServers = mutableStateOf(emptyList()),
+                  close = close,
+                  rhId = rhId
+                )
+              }
             }
-          }
-        )
+            .padding(horizontal = 6.dp, vertical = 4.dp),
+          verticalAlignment = Alignment.CenterVertically,
+          horizontalArrangement = Arrangement.Center
+        ) {
+          Text(
+            stringResource(MR.strings.view_updated_conditions),
+            color = MaterialTheme.colors.primary
+          )
+        }
       }
 
       if (!viaSettings) {
@@ -760,13 +776,54 @@ private val versionDescriptions: List<VersionDescription> = listOf(
         descrId = MR.strings.v6_2_improved_chat_navigation_descr
       ),
     ),
+  ),
+  VersionDescription(
+    version = "v6.3",
+    post = "https://simplex.chat/blog/20250308-simplex-chat-v6-3-new-user-experience-safety-in-public-groups.html",
+    features = listOf(
+      VersionFeature.FeatureDescription(
+        icon = MR.images.ic_at,
+        titleId = MR.strings.v6_3_mentions,
+        descrId = MR.strings.v6_3_mentions_descr
+      ),
+      VersionFeature.FeatureDescription(
+        icon = MR.images.ic_flag,
+        titleId = MR.strings.v6_3_reports,
+        descrId = MR.strings.v6_3_reports_descr
+      ),
+      VersionFeature.FeatureDescription(
+        icon = MR.images.ic_menu,
+        titleId = MR.strings.v6_3_organize_chat_lists,
+        descrId = MR.strings.v6_3_organize_chat_lists_descr
+      ),
+      VersionFeature.FeatureDescription(
+        icon = null,
+        titleId = MR.strings.v6_3_better_privacy_and_security,
+        descrId = null,
+        subfeatures = listOf(
+          MR.images.ic_visibility_off to MR.strings.v6_3_private_media_file_names,
+          MR.images.ic_delete to MR.strings.v6_3_set_message_expiration_in_chats
+        )
+      ),
+      VersionFeature.FeatureDescription(
+        icon = null,
+        titleId = MR.strings.v6_3_better_groups_performance,
+        descrId = null,
+        subfeatures = listOf(
+          MR.images.ic_bolt to MR.strings.v6_3_faster_sending_messages,
+          MR.images.ic_group_off to MR.strings.v6_3_faster_deletion_of_groups
+        )
+      ),
+    )
   )
 )
 
 private val lastVersion = versionDescriptions.last().version
 
 fun setLastVersionDefault(m: ChatModel) {
-  m.controller.appPrefs.whatsNewVersion.set(lastVersion)
+  if (appPrefs.whatsNewVersion.get() != lastVersion) {
+    appPrefs.whatsNewVersion.set(lastVersion)
+  }
 }
 
 fun shouldShowWhatsNew(m: ChatModel): Boolean {

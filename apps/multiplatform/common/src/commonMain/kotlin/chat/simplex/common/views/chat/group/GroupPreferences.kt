@@ -21,6 +21,7 @@ import chat.simplex.res.MR
 
 private val featureRoles: List<Pair<GroupMemberRole?, String>> = listOf(
   null to generalGetString(MR.strings.feature_roles_all_members),
+  GroupMemberRole.Moderator to generalGetString(MR.strings.feature_roles_moderators),
   GroupMemberRole.Admin to generalGetString(MR.strings.feature_roles_admins),
   GroupMemberRole.Owner to generalGetString(MR.strings.feature_roles_owners)
 )
@@ -44,6 +45,9 @@ fun GroupPreferencesView(m: ChatModel, rhId: Long?, chatId: String, close: () ->
         withChats {
           updateGroup(rhId, g)
           currentPreferences = preferences
+        }
+        withChats {
+          updateGroup(rhId, g)
         }
       }
       afterSave()
@@ -130,6 +134,11 @@ private fun GroupPreferencesLayout(
     }
 
     SectionDividerSpaced(true, maxBottomPadding = false)
+    val enableReports = remember(preferences) { mutableStateOf(preferences.reports.enable) }
+    FeatureSection(GroupFeature.Reports, enableReports, null, groupInfo, preferences, onTTLUpdated) { enable, _ ->
+      applyPrefs(preferences.copy(reports = GroupPreference(enable = enable)))
+    }
+    SectionDividerSpaced(true, maxBottomPadding = false)
     val enableHistory = remember(preferences) { mutableStateOf(preferences.history.enable) }
     FeatureSection(GroupFeature.History, enableHistory, null, groupInfo, preferences, onTTLUpdated) { enable, _ ->
       applyPrefs(preferences.copy(history = GroupPreference(enable = enable)))
@@ -166,6 +175,7 @@ private fun FeatureSection(
         feature.text,
         icon,
         iconTint,
+        disabled = feature == GroupFeature.Reports, // remove in 6.4
         checked = enableFeature.value == GroupFeatureEnabled.ON,
       ) { checked ->
         onSelected(if (checked) GroupFeatureEnabled.ON else GroupFeatureEnabled.OFF, enableForRole?.value)
