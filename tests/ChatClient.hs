@@ -54,8 +54,8 @@ import Simplex.Messaging.Crypto.Ratchet (supportedE2EEncryptVRange)
 import qualified Simplex.Messaging.Crypto.Ratchet as CR
 import Simplex.Messaging.Protocol (srvHostnamesSMPClientVersion)
 import Simplex.Messaging.Server (runSMPServerBlocking)
-import Simplex.Messaging.Server.Env.STM (ServerConfig (..), StartOptions (..), defaultMessageExpiration, defaultIdleQueueInterval, defaultNtfExpiration, defaultInactiveClientExpiration)
-import Simplex.Messaging.Server.MsgStore.Types (AMSType (..), SMSType (..))
+import Simplex.Messaging.Server.Env.STM (AServerStoreCfg (..), ServerConfig (..), ServerStoreCfg (..), StartOptions (..), StorePaths (..), defaultMessageExpiration, defaultIdleQueueInterval, defaultNtfExpiration, defaultInactiveClientExpiration)
+import Simplex.Messaging.Server.MsgStore.Types (SQSType (..), SMSType (..))
 import Simplex.Messaging.Transport
 import Simplex.Messaging.Transport.Server (ServerCredentials (..), defaultTransportServerConfig)
 import Simplex.Messaging.Version
@@ -117,7 +117,9 @@ testCoreOpts =
         { dbConnstr = testDBConnstr,
           -- dbSchemaPrefix is not used in tests (except bot tests where it's redefined),
           -- instead different schema prefix is passed per client so that single test database is used
-          dbSchemaPrefix = ""
+          dbSchemaPrefix = "",
+          dbPoolSize = 3,
+          dbCreateSchema = True
 #else
         { dbFilePrefix = "./simplex_v1", -- dbFilePrefix is not used in tests (except bot tests where it's redefined)
           dbKey = "", -- dbKey = "this is a pass-phrase to encrypt the database",
@@ -476,14 +478,12 @@ smpServerCfg =
   ServerConfig
     { transports = [(serverPort, transport @TLS, False)],
       tbqSize = 1,
-      msgStoreType = AMSType SMSMemory,
       msgQueueQuota = 16,
       maxJournalMsgCount = 24,
       maxJournalStateLines = 4,
       queueIdBytes = 12,
       msgIdBytes = 6,
-      storeLogFile = Nothing,
-      storeMsgsFile = Nothing,
+      serverStoreCfg = ASSCfg SQSMemory SMSMemory $ SSCMemory Nothing,
       storeNtfsFile = Nothing,
       allowNewQueues = True,
       -- server password is disabled as otherwise v1 tests fail
@@ -518,8 +518,11 @@ smpServerCfg =
       allowSMPProxy = True,
       serverClientConcurrency = 16,
       information = Nothing,
-      startOptions = StartOptions False False
+      startOptions = StartOptions {maintenance = False, compactLog = False, skipWarnings = False, confirmMigrations = MCYesUp}
     }
+
+persistentServerStoreCfg :: FilePath -> AServerStoreCfg
+persistentServerStoreCfg tmp = ASSCfg SQSMemory SMSMemory $ SSCMemory $ Just StorePaths {storeLogFile = tmp <> "/smp-server-store.log", storeMsgsFile = Just $ tmp <> "/smp-server-messages.log"}
 
 withSmpServer :: IO () -> IO ()
 withSmpServer = withSmpServer' smpServerCfg
