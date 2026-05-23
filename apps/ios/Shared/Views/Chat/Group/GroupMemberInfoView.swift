@@ -5,6 +5,7 @@
 //  Created by JRoberts on 25.07.2022.
 //  Copyright © 2022 SimpleX Chat. All rights reserved.
 //
+// Spec: spec/client/chat-view.md
 
 import SwiftUI
 import SimpleXChat
@@ -16,7 +17,10 @@ struct GroupMemberInfoView: View {
     @State var groupInfo: GroupInfo
     @ObservedObject var chat: Chat
     @ObservedObject var groupMember: GMember
+    @Binding var scrollToItemId: ChatItem.ID?
     var navigation: Bool = false
+    var openedFromSupportChat: Bool = false
+    var groupRelay: GroupRelay? = nil
     @State private var connectionStats: ConnectionStats? = nil
     @State private var connectionCode: String? = nil
     @State private var connectionLoaded: Bool = false
@@ -25,22 +29,39 @@ struct GroupMemberInfoView: View {
     @State private var knownContactConnectionStats: ConnectionStats? = nil
     @State private var newRole: GroupMemberRole = .member
     @State private var alert: GroupMemberInfoViewAlert?
-    @State private var sheet: PlanAndConnectActionSheet?
     @AppStorage(DEFAULT_DEVELOPER_TOOLS) private var developerTools = false
     @State private var justOpened = true
     @State private var progressIndicator = false
+
+    private var channelMemberSectionHeader: LocalizedStringKey {
+        if groupInfo.useRelays {
+            switch groupMember.wrapped.memberRole {
+            case .relay: "Relay"
+            case .owner: "Owner"
+            default: "Subscriber"
+            }
+        } else {
+            "Member"
+        }
+    }
+
+    private var relaySectionFooter: LocalizedStringKey {
+        if groupInfo.isOwner {
+            "Subscribers use relay link to connect to the channel.\nRelay address was used to set up this relay for the channel."
+        } else {
+            "You connected to the channel via this relay link."
+        }
+    }
 
     enum GroupMemberInfoViewAlert: Identifiable {
         case blockMemberAlert(mem: GroupMember)
         case unblockMemberAlert(mem: GroupMember)
         case blockForAllAlert(mem: GroupMember)
         case unblockForAllAlert(mem: GroupMember)
-        case removeMemberAlert(mem: GroupMember)
         case changeMemberRoleAlert(mem: GroupMember, role: GroupMemberRole)
         case switchAddressAlert
         case abortSwitchAddressAlert
         case syncConnectionForceAlert
-        case planAndConnectAlert(alert: PlanAndConnectAlert)
         case queueInfo(info: String)
         case someAlert(alert: SomeAlert)
         case error(title: LocalizedStringKey, error: LocalizedStringKey?)
@@ -51,12 +72,10 @@ struct GroupMemberInfoView: View {
             case let .unblockMemberAlert(mem): return "unblockMemberAlert \(mem.groupMemberId)"
             case let .blockForAllAlert(mem): return "blockForAllAlert \(mem.groupMemberId)"
             case let .unblockForAllAlert(mem): return "unblockForAllAlert \(mem.groupMemberId)"
-            case let .removeMemberAlert(mem): return "removeMemberAlert \(mem.groupMemberId)"
             case let .changeMemberRoleAlert(mem, role): return "changeMemberRoleAlert \(mem.groupMemberId) \(role.rawValue)"
             case .switchAddressAlert: return "switchAddressAlert"
             case .abortSwitchAddressAlert: return "abortSwitchAddressAlert"
             case .syncConnectionForceAlert: return "syncConnectionForceAlert"
-            case let .planAndConnectAlert(alert): return "planAndConnectAlert \(alert.id)"
             case let .queueInfo(info): return "queueInfo \(info)"
             case let .someAlert(alert): return "someAlert \(alert.id)"
             case let .error(title, _): return "error \(title)"
@@ -91,19 +110,32 @@ struct GroupMemberInfoView: View {
                     .listRowSeparator(.hidden)
                     .padding(.bottom, 18)
 
-                infoActionButtons(member)
-                    .padding(.horizontal)
-                    .frame(maxWidth: .infinity)
-                    .frame(height: infoViewActionButtonHeight)
-                    .listRowBackground(Color.clear)
-                    .listRowSeparator(.hidden)
-                    .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
+                if !groupInfo.useRelays {
+                    infoActionButtons(member)
+                        .padding(.horizontal)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: infoViewActionButtonHeight)
+                        .listRowBackground(Color.clear)
+                        .listRowSeparator(.hidden)
+                        .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
+                }
 
                 if connectionLoaded {
+                    let showMemberSupportChat = !openedFromSupportChat
+                        && groupInfo.membership.memberRole >= .moderator
+                        && member.memberRole != .relay
+                        && ((groupInfo.fullGroupPreferences.support.on && member.memberRole < .moderator)
+                            || member.supportChat != nil)
 
                     if member.memberActive {
                         Section {
-                            if let code = connectionCode { verifyCodeButton(code) }
+                            if showMemberSupportChat {
+                                MemberInfoSupportChatNavLink(groupInfo: groupInfo, member: groupMember, scrollToItemId: $scrollToItemId)
+                            }
+                            if let code = connectionCode,
+                               !(groupInfo.useRelays && member.memberRole == .relay) {
+                                verifyCodeButton(code)
+                            }
                             if let connStats = connectionStats,
                                connStats.ratchetSyncAllowed {
                                 synchronizeConnectionButton()
@@ -111,6 +143,10 @@ struct GroupMemberInfoView: View {
                             // } else if developerTools {
                             //     synchronizeConnectionButtonForce()
                             // }
+                        }
+                    } else if groupInfo.useRelays && member.memberCurrent && showMemberSupportChat {
+                        Section {
+                            MemberInfoSupportChatNavLink(groupInfo: groupInfo, member: groupMember, scrollToItemId: $scrollToItemId)
                         }
                     }
 
@@ -138,11 +174,11 @@ struct GroupMemberInfoView: View {
                         }
                     }
 
-                    Section(header: Text("Member").foregroundColor(theme.colors.secondary)) {
-                        let label: LocalizedStringKey = groupInfo.businessChat == nil ? "Group" : "Chat"
+                    Section {
+                        let label: LocalizedStringKey = groupInfo.useRelays ? "Channel" : groupInfo.businessChat == nil ? "Group" : "Chat"
                         infoRow(label, groupInfo.displayName)
 
-                        if let roles = member.canChangeRoleTo(groupInfo: groupInfo) {
+                        if !groupInfo.useRelays, let roles = member.canChangeRoleTo(groupInfo: groupInfo) {
                             Picker("Change role", selection: $newRole) {
                                 ForEach(roles) { role in
                                     Text(role.text)
@@ -152,11 +188,39 @@ struct GroupMemberInfoView: View {
                         } else {
                             infoRow("Role", member.memberRole.text)
                         }
+                        if let link = member.relayLink {
+                            infoRow("Relay link", String.localizedStringWithFormat(NSLocalizedString("via %@", comment: "relay hostname"), hostFromRelayLink(link)))
+                        }
+                        if let address = groupRelay?.userChatRelay.address {
+                            infoRow("Relay address", String.localizedStringWithFormat(NSLocalizedString("via %@", comment: "relay hostname"), hostFromRelayLink(address)))
+                            Button {
+                                showShareSheet(items: [simplexChatLink(address)])
+                            } label: {
+                                Label("Share relay address", systemImage: "square.and.arrow.up")
+                            }
+                        }
+                        if groupRelay?.relayStatus == .rejected {
+                            infoRow("Status", "rejected by relay operator")
+                        }
+                    } header: {
+                        Text(channelMemberSectionHeader).foregroundColor(theme.colors.secondary)
+                    } footer: {
+                        if groupInfo.useRelays && member.memberRole == .relay {
+                            Text(relaySectionFooter).foregroundColor(theme.colors.secondary)
+                        }
                     }
 
                     if let connStats = connectionStats {
                         Section(header: Text("Servers").foregroundColor(theme.colors.secondary)) {
-                            // TODO network connection status
+                            if let subStatus = connStats.subStatus {
+                                SubStatusRow(status: subStatus)
+                                    .onTapGesture {
+                                        showAlert(
+                                            NSLocalizedString("Network status", comment: "alert title"),
+                                            message: subStatus.statusExplanation
+                                        )
+                                    }
+                            }
                             Button("Change receiving address") {
                                 alert = .switchAddressAlert
                             }
@@ -178,9 +242,22 @@ struct GroupMemberInfoView: View {
                         }
                     }
 
-                    if groupInfo.membership.memberRole >= .admin {
+                    if let connFailedErr = member.activeConn?.connFailedErr {
+                        Section {
+                            Text(connFailedErr)
+                                .foregroundColor(theme.colors.secondary)
+                        } header: {
+                            HStack(spacing: 6) {
+                                Image(systemName: "exclamationmark.triangle")
+                                    .foregroundColor(.red)
+                                Text("Connection failed")
+                            }
+                        }
+                    }
+
+                    if groupInfo.membership.memberRole >= .moderator {
                         adminDestructiveSection(member)
-                    } else {
+                    } else if !groupInfo.useRelays {
                         nonAdminBlockSection(member)
                     }
 
@@ -192,15 +269,18 @@ struct GroupMemberInfoView: View {
                                 let connLevelDesc = conn.connLevel == 0 ? NSLocalizedString("direct", comment: "connection level description") : String.localizedStringWithFormat(NSLocalizedString("indirect (%d)", comment: "connection level description"), conn.connLevel)
                                 infoRow("Connection", connLevelDesc)
                             }
-                            Button ("Debug delivery") {
-                                Task {
-                                    do {
-                                        let info = queueInfoText(try await apiGroupMemberQueueInfo(groupInfo.apiId, member.groupMemberId))
-                                        await MainActor.run { alert = .queueInfo(info: info) }
-                                    } catch let e {
-                                        logger.error("apiContactQueueInfo error: \(responseError(e))")
-                                        let a = getErrorAlert(e, "Error")
-                                        await MainActor.run { alert = .error(title: a.title, error: a.message) }
+                            if !groupInfo.useRelays || member.memberRole == .relay {
+                                Button ("Debug delivery") {
+                                    Task {
+                                        do {
+                                            if let info = try await apiGroupMemberQueueInfo(groupInfo.apiId, member.groupMemberId) {
+                                                await MainActor.run { alert = .queueInfo(info: queueInfoText(info)) }
+                                            }
+                                        } catch let e {
+                                            logger.error("apiContactQueueInfo error: \(responseError(e))")
+                                            let a = getErrorAlert(e, "Error")
+                                            await MainActor.run { alert = .error(title: a.title, error: a.message) }
+                                        }
                                     }
                                 }
                             }
@@ -260,25 +340,22 @@ struct GroupMemberInfoView: View {
                 case let .unblockMemberAlert(mem): return unblockMemberAlert(groupInfo, mem)
                 case let .blockForAllAlert(mem): return blockForAllAlert(groupInfo, mem)
                 case let .unblockForAllAlert(mem): return unblockForAllAlert(groupInfo, mem)
-                case let .removeMemberAlert(mem): return removeMemberAlert(mem)
                 case let .changeMemberRoleAlert(mem, _): return changeMemberRoleAlert(mem)
                 case .switchAddressAlert: return switchAddressAlert(switchMemberAddress)
                 case .abortSwitchAddressAlert: return abortSwitchAddressAlert(abortSwitchMemberAddress)
                 case .syncConnectionForceAlert: return syncConnectionForceAlert({ syncMemberConnection(force: true) })
-                case let .planAndConnectAlert(alert): return planAndConnectAlert(alert, dismiss: true)
                 case let .queueInfo(info): return queueInfoAlert(info)
                 case let .someAlert(a): return a.alert
                 case let .error(title, error): return mkAlert(title: title, message: error)
                 }
             }
-            .actionSheet(item: $sheet) { s in planAndConnectActionSheet(s, dismiss: true) }
 
             if progressIndicator {
                 ProgressView().scaleEffect(2)
             }
         }
         .onChange(of: chat.chatInfo) { c in
-            if case let .group(gI) = chat.chatInfo {
+            if case let .group(gI, _) = chat.chatInfo {
                 groupInfo = gI
             }
         }
@@ -345,10 +422,8 @@ struct GroupMemberInfoView: View {
         Button {
             planAndConnect(
                 contactLink,
-                showAlert: { alert = .planAndConnectAlert(alert: $0) },
-                showActionSheet: { sheet = $0 },
-                dismiss: true,
-                incognito: nil
+                theme: theme,
+                dismiss: true
             )
         } label: {
             Label("Connect", systemImage: "link")
@@ -395,7 +470,6 @@ struct GroupMemberInfoView: View {
                             ItemsModel.shared.loadOpenChat(memberContact.id) {
                                 dismissAllSheets(animated: true)
                             }
-                            NetworkModel.shared.setContactNetworkStatus(memberContact, .connected)
                         }
                     } catch let error {
                         logger.error("createMemberContactButton apiCreateMemberContact error: \(responseError(error))")
@@ -445,33 +519,68 @@ struct GroupMemberInfoView: View {
             MemberProfileImage(mem, size: 192, color: Color(uiColor: .tertiarySystemFill))
                 .padding(.top, 12)
                 .padding()
+            // show alias if set, alias cannot be edited in this view
+            let displayName = mem.displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+            let fullName = mem.fullName.trimmingCharacters(in: .whitespacesAndNewlines)
             if mem.verified {
                 (
                     Text(Image(systemName: "checkmark.shield"))
                         .foregroundColor(theme.colors.secondary)
                         .font(.title2)
                     + textSpace
-                    + Text(mem.displayName)
+                    + Text(displayName)
                         .font(.largeTitle)
                 )
                 .multilineTextAlignment(.center)
                 .lineLimit(2)
                 .padding(.bottom, 2)
             } else {
-                Text(mem.displayName)
+                Text(displayName)
                     .font(.largeTitle)
                     .multilineTextAlignment(.center)
                     .lineLimit(2)
                     .padding(.bottom, 2)
             }
-            if mem.fullName != "" && mem.fullName != mem.displayName {
+            if fullName != "" && fullName != displayName && fullName != mem.memberProfile.displayName.trimmingCharacters(in: .whitespacesAndNewlines) {
                 Text(mem.fullName)
                     .font(.title2)
+                    .multilineTextAlignment(.center)
+                    .lineLimit(3)
+                    .padding(.bottom, 2)
+            }
+            if let descr = mem.memberProfile.shortDescr?.trimmingCharacters(in: .whitespacesAndNewlines), descr != "" {
+                Text(descr)
+                    .font(.subheadline)
                     .multilineTextAlignment(.center)
                     .lineLimit(4)
             }
         }
         .frame(maxWidth: .infinity, alignment: .center)
+    }
+
+    struct MemberInfoSupportChatNavLink: View {
+        @EnvironmentObject var theme: AppTheme
+        var groupInfo: GroupInfo
+        var member: GMember
+        @Binding var scrollToItemId: ChatItem.ID?
+        @State private var navLinkActive = false
+
+        var body: some View {
+            let scopeInfo: GroupChatScopeInfo = .memberSupport(groupMember_: member.wrapped)
+            NavigationLink(isActive: $navLinkActive) {
+                SecondaryChatView(
+                    chat: Chat(chatInfo: .group(groupInfo: groupInfo, groupChatScope: scopeInfo), chatItems: [], chatStats: ChatStats()),
+                    scrollToItemId: $scrollToItemId
+                )
+            } label: {
+                Label("Chat with member", systemImage: "flag")
+            }
+            .onChange(of: navLinkActive) { active in
+                if active {
+                    ItemsModel.loadSecondaryChat(groupInfo.id, chatFilter: .groupChatScopeContext(groupScopeInfo: scopeInfo))
+                }
+            }
+        }
     }
 
     private func verifyCodeButton(_ code: String) -> some View {
@@ -535,8 +644,13 @@ struct GroupMemberInfoView: View {
                         blockForAllButton(mem)
                     }
                 }
-                if canRemove {
-                    removeMemberButton(mem)
+                // TODO [relays] re-enable when relay management ships
+                if canRemove && mem.memberRole != .relay {
+                    if mem.memberStatus != .memRemoved && (mem.memberStatus != .memLeft || mem.memberRole == .relay) {
+                        removeMemberButton(mem)
+                    } else if mem.memberRole != .relay {
+                        deleteMemberMessagesButton(mem)
+                    }
                 }
             }
         }
@@ -591,40 +705,35 @@ struct GroupMemberInfoView: View {
 
     private func removeMemberButton(_ mem: GroupMember) -> some View {
         Button(role: .destructive) {
-            alert = .removeMemberAlert(mem: mem)
+            showRemoveMemberAlert(groupInfo, mem, dismiss: dismiss)
         } label: {
-            Label("Remove member", systemImage: "trash")
+            let text = mem.memberRole == .relay ? "Remove relay"
+                : groupInfo.useRelays ? "Remove subscriber"
+                : "Remove member"
+            Label(text, systemImage: "trash")
                 .foregroundColor(.red)
         }
     }
 
-    private func removeMemberAlert(_ mem: GroupMember) -> Alert {
-        let label: LocalizedStringKey = (
-            groupInfo.businessChat == nil
-            ? "Member will be removed from group - this cannot be undone!"
-            : "Member will be removed from chat - this cannot be undone!"
-        )
-        return Alert(
-            title: Text("Remove member?"),
-            message: Text(label),
-            primaryButton: .destructive(Text("Remove")) {
-                Task {
-                    do {
-                        let updatedMembers = try await apiRemoveMembers(groupInfo.groupId, [mem.groupMemberId])
-                        await MainActor.run {
-                            updatedMembers.forEach { updatedMember in
-                                _ = chatModel.upsertGroupMember(groupInfo, updatedMember)
-                            }
-                            dismiss()
-                        }
-                    } catch let error {
-                        logger.error("apiRemoveMembers error: \(responseError(error))")
-                        let a = getErrorAlert(error, "Error removing member")
-                        alert = .error(title: a.title, error: a.message)
-                    }
-                }
-            },
-            secondaryButton: .cancel()
+    private func deleteMemberMessagesButton(_ mem: GroupMember) -> some View {
+        Button(role: .destructive) {
+            showDeleteMemberMessagesAlert(mem)
+        } label: {
+            Label("Delete member messages", systemImage: "trash")
+                .foregroundColor(.red)
+        }
+    }
+
+    func showDeleteMemberMessagesAlert(_ mem: GroupMember) {
+        showAlert(
+            NSLocalizedString("Delete member messages?", comment: "alert title"),
+            message: NSLocalizedString("Member messages will be deleted - this cannot be undone!", comment: "alert message"),
+            actions: {[
+                UIAlertAction(title: NSLocalizedString("Delete messages", comment: "alert action"), style: .destructive) { _ in
+                    removeMember(groupInfo, mem, withMessages: true, dismiss: dismiss)
+                },
+                cancelAlertAction
+            ]}
         )
     }
 
@@ -781,7 +890,7 @@ func updateMemberSettings(_ gInfo: GroupInfo, _ member: GroupMember, _ memberSet
 
 func blockForAllAlert(_ gInfo: GroupInfo, _ mem: GroupMember) -> Alert {
     Alert(
-        title: Text("Block member for all?"),
+        title: Text(gInfo.useRelays ? "Block subscriber for all?" : "Block member for all?"),
         message: Text("All new messages from \(mem.chatViewName) will be hidden!"),
         primaryButton: .destructive(Text("Block for all")) {
             blockMemberForAll(gInfo, mem, true)
@@ -792,7 +901,7 @@ func blockForAllAlert(_ gInfo: GroupInfo, _ mem: GroupMember) -> Alert {
 
 func unblockForAllAlert(_ gInfo: GroupInfo, _ mem: GroupMember) -> Alert {
     Alert(
-        title: Text("Unblock member for all?"),
+        title: Text(gInfo.useRelays ? "Unblock subscriber for all?" : "Unblock member for all?"),
         message: Text("Messages from \(mem.chatViewName) will be shown!"),
         primaryButton: .default(Text("Unblock for all")) {
             blockMemberForAll(gInfo, mem, false)
@@ -821,7 +930,8 @@ struct GroupMemberInfoView_Previews: PreviewProvider {
         GroupMemberInfoView(
             groupInfo: GroupInfo.sampleData,
             chat: Chat.sampleData,
-            groupMember: GMember.sampleData
+            groupMember: GMember.sampleData,
+            scrollToItemId: Binding.constant(nil)
         )
     }
 }

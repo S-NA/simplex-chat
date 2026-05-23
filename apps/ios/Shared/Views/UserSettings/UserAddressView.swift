@@ -11,14 +11,16 @@ import MessageUI
 @preconcurrency import SimpleXChat
 
 struct UserAddressView: View {
+    @Environment(\.colorScheme) var colorScheme
     @Environment(\.dismiss) var dismiss: DismissAction
     @EnvironmentObject private var chatModel: ChatModel
     @EnvironmentObject var theme: AppTheme
     @State var shareViaProfile = false
     @State var autoCreate = false
+    var onboarding: Bool = false
     @State private var showShortLink = true
-    @State private var aas = AutoAcceptState()
-    @State private var savedAAS = AutoAcceptState()
+    @State private var settings = AddressSettingsState()
+    @State private var savedSettings = AddressSettingsState()
     @State private var showMailView = false
     @State private var mailViewResult: Result<MFMailComposeResult, Error>? = nil
     @State private var alert: UserAddressAlert?
@@ -54,6 +56,14 @@ struct UserAddressView: View {
                 }
             }
         }
+        .if(onboarding) { v in
+            v.toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Image(systemName: "info.circle").opacity(0)
+                }
+            }
+            .navigationBarTitleDisplayMode(.inline)
+        }
         .onAppear {
             if chatModel.userAddress == nil, autoCreate {
                 createAddress()
@@ -64,12 +74,16 @@ struct UserAddressView: View {
     private func userAddressView() -> some View {
         List {
             if let userAddress = chatModel.userAddress {
-                existingAddressView(userAddress)
-                    .onAppear {
-                        aas = AutoAcceptState(userAddress: userAddress)
-                        savedAAS = aas
-                    }
-            } else {
+                if onboarding {
+                    onboardingAddressView(userAddress)
+                } else {
+                    existingAddressView(userAddress)
+                        .onAppear {
+                            settings = AddressSettingsState(settings: userAddress.addressSettings)
+                            savedSettings = AddressSettingsState(settings: userAddress.addressSettings)
+                        }
+                }
+            } else if !onboarding {
                 Section {
                     createAddressButton()
                 } header: {
@@ -121,8 +135,8 @@ struct UserAddressView: View {
                 )
             case .shareOnCreate:
                 return Alert(
-                    title: Text("Share address with contacts?"),
-                    message: Text("Add address to your profile, so that your contacts can share it with other people. Profile update will be sent to your contacts."),
+                    title: Text("Share address with SimpleX contacts?"),
+                    message: Text("Add address to your profile, so that your SimpleX contacts can share it with other people. Profile update will be sent to your SimpleX contacts."),
                     primaryButton: .default(Text("Share")) {
                         setProfileAddress($progressIndicator, true)
                         shareViaProfile = true
@@ -138,25 +152,40 @@ struct UserAddressView: View {
         Section {
             SimpleXCreatedLinkQRCode(link: userAddress.connLinkContact, short: $showShortLink)
                 .id("simplex-contact-address-qrcode-\(userAddress.connLinkContact.simplexChatUri(short: showShortLink))")
-            shareQRCodeButton(userAddress)
+            if userAddress.shouldBeUpgraded {
+                upgradeAddressButton()
+            }
+            shareAddressButton(userAddress)
             // if MFMailComposeViewController.canSendMail() {
             //     shareViaEmailButton(userAddress)
             // }
             settingsRow("briefcase", color: theme.colors.secondary) {
-                Toggle("Business address", isOn: $aas.business)
-                    .onChange(of: aas.business) { ba in
+                Toggle("Business address", isOn: $settings.businessAddress)
+                    .onChange(of: settings.businessAddress) { ba in
                         if ba {
-                            aas.enable = true
-                            aas.incognito = false
+                            settings.autoAccept = true
+                            settings.autoAcceptIncognito = false
                         }
-                        saveAAS($aas, $savedAAS)
+                        saveAddressSettings(settings, $savedSettings)
                     }
             }
             addressSettingsButton(userAddress)
         } header: {
+            #if SIMPLEX_ASSETS
+            VStack(alignment: .leading, spacing: 0) {
+                Image(colorScheme == .light ? "simplex-address-small" : "simplex-address-small-light")
+                    .resizable()
+                    .scaledToFit()
+                    .frame(maxWidth: .infinity)
+                    .padding(.top, -20)
+                ToggleShortLinkHeader(text: Text("For social media"), link: userAddress.connLinkContact, short: $showShortLink)
+            }
+            .padding(.bottom, 4)
+            #else
             ToggleShortLinkHeader(text: Text("For social media"), link: userAddress.connLinkContact, short: $showShortLink)
+            #endif
         } footer: {
-            if aas.business {
+            if settings.businessAddress {
                 Text("Add your team members to the conversations.")
                     .foregroundColor(theme.colors.secondary)
             }
@@ -181,6 +210,54 @@ struct UserAddressView: View {
         }
     }
 
+    @ViewBuilder private func onboardingAddressView(_ userAddress: UserContactLink) -> some View {
+        Section {
+            HStack(spacing: 8) {
+                let link = userAddress.connLinkContact.simplexChatUri(short: showShortLink)
+                linkTextView(link)
+                Button { showShareSheet(items: [link]) } label: {
+                    Image(systemName: "square.and.arrow.up")
+                        .padding(.top, -7)
+                        .padding(.horizontal, 8)
+                }
+            }
+            .frame(maxWidth: .infinity)
+        } header: {
+            #if SIMPLEX_ASSETS
+            VStack(alignment: .leading) {
+                Image(colorScheme == .light ? "simplex-address" : "simplex-address-light")
+                    .resizable()
+                    .scaledToFit()
+                    .frame(maxWidth: .infinity)
+                Text("Use this address in your social media profile, website, or email signature.")
+                    .font(.body).foregroundColor(theme.colors.onBackground).textCase(nil)
+            }
+            .padding(.bottom, 4)
+            #else
+            Text("Use this address in your social media profile, website, or email signature.")
+                .font(.body).foregroundColor(theme.colors.onBackground).textCase(nil)
+                .padding(.bottom, 6)
+            #endif
+        }
+        .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 10))
+
+        Section {
+            SimpleXCreatedLinkQRCode(link: userAddress.connLinkContact, short: $showShortLink)
+                .id("simplex-contact-address-qrcode-\(userAddress.connLinkContact.simplexChatUri(short: showShortLink))")
+                .padding()
+                .background(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .fill(Color(uiColor: .secondarySystemGroupedBackground))
+                )
+                .padding(.horizontal)
+                .listRowBackground(Color.clear)
+                .listRowSeparator(.hidden)
+                .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
+        } header: {
+            Text("Or use this QR - print or show online.").font(.body).foregroundColor(theme.colors.onBackground).textCase(nil)
+        }
+    }
+
     private func createAddressButton() -> some View {
         Button {
             createAddress()
@@ -193,18 +270,42 @@ struct UserAddressView: View {
         progressIndicator = true
         Task {
             do {
-                let short = UserDefaults.standard.bool(forKey: DEFAULT_PRIVACY_SHORT_LINKS)
-                let connLinkContact = try await apiCreateUserAddress(short: short)
+                let connLinkContact = try await apiCreateUserAddress()
                 DispatchQueue.main.async {
-                    chatModel.userAddress = UserContactLink(connLinkContact: connLinkContact)
-                    alert = .shareOnCreate
-                    progressIndicator = false
+                    if let connLinkContact {
+                        chatModel.userAddress = UserContactLink(connLinkContact)
+                        let hasRelevantContacts = chatModel.chats.contains { chat in
+                            if case let .direct(contact) = chat.chatInfo {
+                                return contact.active && !contact.isContactCard && !contact.contactConnIncognito
+                            }
+                            return false
+                        }
+                        if hasRelevantContacts {
+                            alert = .shareOnCreate
+                            progressIndicator = false
+                        } else {
+                            setProfileAddress($progressIndicator, true)
+                            shareViaProfile = true
+                        }
+                    } else {
+                        progressIndicator = false
+                    }
                 }
             } catch let error {
                 logger.error("UserAddressView apiCreateUserAddress: \(responseError(error))")
                 let a = getErrorAlert(error, "Error creating address")
                 alert = .error(title: a.title, error: a.message)
                 await MainActor.run { progressIndicator = false }
+            }
+        }
+    }
+
+    private func upgradeAddressButton() -> some View {
+        Button {
+            upgradeAndShareAddressAlert(progressIndicator: $progressIndicator)
+        } label: {
+            settingsRow("arrow.up", color: theme.colors.primary) {
+                Text("Upgrade address")
             }
         }
     }
@@ -230,9 +331,13 @@ struct UserAddressView: View {
         }
     }
 
-    private func shareQRCodeButton(_ userAddress: UserContactLink) -> some View {
-        Button {
-            showShareSheet(items: [simplexChatLink(userAddress.connLinkContact.simplexChatUri(short: showShortLink))])
+    private func shareAddressButton(_ userAddress: UserContactLink) -> some View {
+        return Button {
+            if userAddress.shouldBeUpgraded {
+                upgradeAndShareAddressAlert(progressIndicator: $progressIndicator, shareAddress: { userAddress.shareAddress(short: showShortLink) })
+            } else {
+                userAddress.shareAddress(short: showShortLink)
+            }
         } label: {
             settingsRow("square.and.arrow.up", color: theme.colors.secondary) {
                 Text("Share address")
@@ -295,14 +400,55 @@ struct UserAddressView: View {
     }
 }
 
+func upgradeAndShareAddressAlert(progressIndicator: Binding<Bool>, shareAddress: (() -> Void)? = nil) {
+    showAlert(
+        NSLocalizedString("Upgrade address?", comment: "alert message"),
+        message: NSLocalizedString("The address will be short, and your profile will be shared via the address.", comment: "alert message"),
+        actions: {
+            var actions = [UIAlertAction(title: NSLocalizedString("Upgrade", comment: "alert button"), style: .default) { _ in
+                addShortLink(progressIndicator: progressIndicator, shareOnCompletion: shareAddress != nil)
+            }]
+            if let shareAddress {
+                actions.append(UIAlertAction(title: NSLocalizedString("Share old address", comment: "alert button"), style: .default) { _ in
+                    shareAddress()
+                })
+            }
+            actions.append(cancelAlertAction)
+            return actions
+        }
+    )
+}
+
+private func addShortLink(progressIndicator: Binding<Bool>, shareOnCompletion: Bool = false) {
+    progressIndicator.wrappedValue = true
+    Task {
+        do {
+            let userAddress = try await apiAddMyAddressShortLink()
+            await MainActor.run {
+                ChatModel.shared.userAddress = userAddress
+                progressIndicator.wrappedValue = false
+                if shareOnCompletion, let userAddress {
+                    userAddress.shareAddress(short: true)
+                }
+            }
+        } catch let error {
+            logger.error("apiAddMyAddressShortLink: \(responseError(error))")
+            showAlert("Error adding short link", message: responseError(error))
+            await MainActor.run { progressIndicator.wrappedValue = false }
+        }
+    }
+}
+
+
 struct ToggleShortLinkHeader: View {
     @EnvironmentObject var theme: AppTheme
+    @AppStorage(DEFAULT_DEVELOPER_TOOLS) private var developerTools = false
     let text: Text
     var link: CreatedConnLink
     @Binding var short: Bool
-    
+
     var body: some View {
-        if link.connShortLink == nil {
+        if link.connShortLink == nil || !developerTools {
             text.foregroundColor(theme.colors.secondary)
         } else {
             HStack {
@@ -317,45 +463,27 @@ struct ToggleShortLinkHeader: View {
     }
 }
 
-private struct AutoAcceptState: Equatable {
-    var enable = false
-    var incognito = false
-    var business = false
-    var welcomeText = ""
+struct AddressSettingsState: Equatable {
+    var businessAddress = false
+    var autoAccept = false
+    var autoAcceptIncognito = false
+    var autoReply = ""
 
-    init(enable: Bool = false, incognito: Bool = false, business: Bool = false, welcomeText: String = "") {
-        self.enable = enable
-        self.incognito = incognito
-        self.business = business
-        self.welcomeText = welcomeText
+    init() {}
+
+    init(settings: AddressSettings) {
+        self.businessAddress = settings.businessAddress
+        self.autoAccept = settings.autoAccept != nil
+        self.autoAcceptIncognito = settings.autoAccept?.acceptIncognito == true
+        self.autoReply = settings.autoReply?.text ?? ""
     }
 
-    init(userAddress: UserContactLink) {
-        if let aa = userAddress.autoAccept {
-            enable = true
-            incognito = aa.acceptIncognito
-            business = aa.businessAddress
-            if let msg = aa.autoReply {
-                welcomeText = msg.text
-            } else {
-                welcomeText = ""
-            }
-        } else {
-            enable = false
-            incognito = false
-            business = false
-            welcomeText = ""
-        }
-    }
-
-    var autoAccept: AutoAccept? {
-        if enable {
-            var autoReply: MsgContent? = nil
-            let s = welcomeText.trimmingCharacters(in: .whitespacesAndNewlines)
-            if s != "" { autoReply = .text(s) }
-            return AutoAccept(businessAddress: business, acceptIncognito: incognito, autoReply: autoReply)
-        }
-        return nil
+    var addressSettings: AddressSettings {
+        AddressSettings(
+            businessAddress: self.businessAddress,
+            autoAccept: self.autoAccept ? AutoAccept(acceptIncognito: self.autoAcceptIncognito) : nil,
+            autoReply: self.autoReply.isEmpty ? nil : MsgContent.text(self.autoReply)
+        )
     }
 }
 
@@ -380,30 +508,32 @@ struct UserAddressSettingsView: View {
     @Environment(\.dismiss) var dismiss: DismissAction
     @EnvironmentObject var theme: AppTheme
     @Binding var shareViaProfile: Bool
-    @State private var aas = AutoAcceptState()
-    @State private var savedAAS = AutoAcceptState()
+    @State private var settings = AddressSettingsState()
+    @State private var savedSettings = AddressSettingsState()
     @State private var ignoreShareViaProfileChange = false
     @State private var progressIndicator = false
-    @FocusState private var keyboardVisible: Bool
 
     var body: some View {
         ZStack {
             if let userAddress = ChatModel.shared.userAddress {
                 userAddressSettingsView()
                     .onAppear {
-                        aas = AutoAcceptState(userAddress: userAddress)
-                        savedAAS = aas
+                        settings = AddressSettingsState(settings: userAddress.addressSettings)
+                        savedSettings = AddressSettingsState(settings: userAddress.addressSettings)
                     }
-                    .onChange(of: aas.enable) { aasEnabled in
-                        if !aasEnabled { aas = AutoAcceptState() }
+                    .onChange(of: settings.autoAccept) { autoAccept in
+                        if !autoAccept {
+                            settings.businessAddress = false
+                            settings.autoReply = ""
+                        }
                     }
                     .onDisappear {
-                        if savedAAS != aas {
+                        if savedSettings != settings {
                             showAlert(
-                                title: NSLocalizedString("Auto-accept settings", comment: "alert title"),
+                                title: NSLocalizedString("SimpleX address settings", comment: "alert title"),
                                 message: NSLocalizedString("Settings were changed.", comment: "alert message"),
                                 buttonTitle: NSLocalizedString("Save", comment: "alert button"),
-                                buttonAction: { saveAAS($aas, $savedAAS) },
+                                buttonAction: { saveAddressSettings(settings, $savedSettings) },
                                 cancelButton: true
                             )
                         }
@@ -421,30 +551,41 @@ struct UserAddressSettingsView: View {
         List {
             Section {
                 shareWithContactsButton()
-                autoAcceptToggle().disabled(aas.business)
+                autoAcceptToggle().disabled(settings.businessAddress)
+                if settings.autoAccept && !ChatModel.shared.addressShortLinkDataSet && !settings.businessAddress {
+                    acceptIncognitoToggle()
+                }
             }
 
-            if aas.enable {
-                autoAcceptSection()
+            Section {
+                messageEditor(placeholder: NSLocalizedString("Enter welcome message… (optional)", comment: "placeholder"), text: $settings.autoReply)
+            } header: {
+                Text("Welcome message")
+                    .foregroundColor(theme.colors.secondary)
+            }
+
+            Section {
+                saveAddressSettingsButton()
+                    .disabled(settings == savedSettings)
             }
         }
     }
 
     private func shareWithContactsButton() -> some View {
         settingsRow("person", color: theme.colors.secondary) {
-            Toggle("Share with contacts", isOn: $shareViaProfile)
+            Toggle("Share with SimpleX contacts", isOn: $shareViaProfile)
                 .onChange(of: shareViaProfile) { on in
                     if ignoreShareViaProfileChange {
                         ignoreShareViaProfileChange = false
                     } else {
                         if on {
                             showAlert(
-                                NSLocalizedString("Share address with contacts?", comment: "alert title"),
-                                message: NSLocalizedString("Profile update will be sent to your contacts.", comment: "alert message"),
+                                NSLocalizedString("Share address with SimpleX contacts?", comment: "alert title"),
+                                message: NSLocalizedString("Profile update will be sent to your SimpleX contacts.", comment: "alert message"),
                                 actions: {[
                                     UIAlertAction(
                                         title: NSLocalizedString("Cancel", comment: "alert action"),
-                                        style: .default,
+                                        style: .cancel,
                                         handler: { _ in
                                             ignoreShareViaProfileChange = true
                                             shareViaProfile = !on
@@ -462,11 +603,11 @@ struct UserAddressSettingsView: View {
                         } else {
                             showAlert(
                                 NSLocalizedString("Stop sharing address?", comment: "alert title"),
-                                message: NSLocalizedString("Profile update will be sent to your contacts.", comment: "alert message"),
+                                message: NSLocalizedString("Profile update will be sent to your SimpleX contacts.", comment: "alert message"),
                                 actions: {[
                                     UIAlertAction(
                                         title: NSLocalizedString("Cancel", comment: "alert action"),
-                                        style: .default,
+                                        style: .cancel,
                                         handler: { _ in
                                             ignoreShareViaProfileChange = true
                                             shareViaProfile = !on
@@ -489,46 +630,31 @@ struct UserAddressSettingsView: View {
 
     private func autoAcceptToggle() -> some View {
         settingsRow("checkmark", color: theme.colors.secondary) {
-            Toggle("Auto-accept", isOn: $aas.enable)
-                .onChange(of: aas.enable) { _ in
-                    saveAAS($aas, $savedAAS)
+            Toggle("Auto-accept", isOn: $settings.autoAccept)
+                .onChange(of: settings.autoAccept) { _ in
+                    saveAddressSettings(settings, $savedSettings)
                 }
-        }
-    }
-
-    private func autoAcceptSection() -> some View {
-        Section {
-            if !aas.business {
-                acceptIncognitoToggle()
-            }
-            welcomeMessageEditor()
-            saveAASButton()
-                .disabled(aas == savedAAS)
-        } header: {
-            Text("Auto-accept")
-                .foregroundColor(theme.colors.secondary)
         }
     }
 
     private func acceptIncognitoToggle() -> some View {
         settingsRow(
-            aas.incognito ? "theatermasks.fill" : "theatermasks",
-            color: aas.incognito ? .indigo : theme.colors.secondary
+            settings.autoAcceptIncognito ? "theatermasks.fill" : "theatermasks",
+            color: settings.autoAcceptIncognito ? .indigo : theme.colors.secondary
         ) {
-            Toggle("Accept incognito", isOn: $aas.incognito)
+            Toggle("Accept incognito", isOn: $settings.autoAcceptIncognito)
         }
     }
 
-    private func welcomeMessageEditor() -> some View {
+    private func messageEditor(placeholder: String, text: Binding<String>) -> some View {
         ZStack {
             Group {
-                if aas.welcomeText.isEmpty {
-                    TextEditor(text: Binding.constant(NSLocalizedString("Enter welcome message… (optional)", comment: "placeholder")))
+                if text.wrappedValue.isEmpty {
+                    TextEditor(text: Binding.constant(placeholder))
                         .foregroundColor(theme.colors.secondary)
                         .disabled(true)
                 }
-                TextEditor(text: $aas.welcomeText)
-                    .focused($keyboardVisible)
+                TextEditor(text: text)
             }
             .padding(.horizontal, -5)
             .padding(.top, -8)
@@ -537,27 +663,27 @@ struct UserAddressSettingsView: View {
         }
     }
 
-    private func saveAASButton() -> some View {
+    private func saveAddressSettingsButton() -> some View {
         Button {
-            keyboardVisible = false
-            saveAAS($aas, $savedAAS)
+            hideKeyboard()
+            saveAddressSettings(settings, $savedSettings)
         } label: {
             Text("Save")
         }
     }
 }
 
-private func saveAAS(_ aas: Binding<AutoAcceptState>, _ savedAAS: Binding<AutoAcceptState>) {
+private func saveAddressSettings(_ settings: AddressSettingsState, _ savedSettings: Binding<AddressSettingsState>) {
     Task {
         do {
-            if let address = try await userAddressAutoAccept(aas.wrappedValue.autoAccept) {
+            if let address = try await apiSetUserAddressSettings(settings.addressSettings) {
                 await MainActor.run {
                     ChatModel.shared.userAddress = address
-                    savedAAS.wrappedValue = aas.wrappedValue
+                    savedSettings.wrappedValue = settings
                 }
             }
         } catch let error {
-            logger.error("userAddressAutoAccept error: \(responseError(error))")
+            logger.error("apiSetUserAddressSettings error: \(responseError(error))")
         }
     }
 }
@@ -565,9 +691,8 @@ private func saveAAS(_ aas: Binding<AutoAcceptState>, _ savedAAS: Binding<AutoAc
 struct UserAddressView_Previews: PreviewProvider {
     static var previews: some View {
         let chatModel = ChatModel()
-        chatModel.userAddress = UserContactLink(connLinkContact: CreatedConnLink(connFullLink: "https://simplex.chat/contact#/?v=1&smp=smp%3A%2F%2FPQUV2eL0t7OStZOoAsPEV2QYWt4-xilbakvGUGOItUo%3D%40smp6.simplex.im%2FK1rslx-m5bpXVIdMZg9NLUZ_8JBm8xTt%23MCowBQYDK2VuAyEALDeVe-sG8mRY22LsXlPgiwTNs9dbiLrNuA7f3ZMAJ2w%3D", connShortLink: nil))
+        chatModel.userAddress = UserContactLink(CreatedConnLink(connFullLink: "https://simplex.chat/contact#/?v=1&smp=smp%3A%2F%2FPQUV2eL0t7OStZOoAsPEV2QYWt4-xilbakvGUGOItUo%3D%40smp6.simplex.im%2FK1rslx-m5bpXVIdMZg9NLUZ_8JBm8xTt%23MCowBQYDK2VuAyEALDeVe-sG8mRY22LsXlPgiwTNs9dbiLrNuA7f3ZMAJ2w%3D", connShortLink: nil))
 
-        
         return Group {
             UserAddressView()
                 .environmentObject(chatModel)

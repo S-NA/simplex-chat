@@ -402,6 +402,11 @@ extension UIImage {
     }
 }
 
+// Max image height/width ratio for chat item display, taller images are cropped
+public func heightRatio(_ size: CGSize) -> CGFloat {
+    size.width > 0 ? min(size.height / size.width, 2.33) : 1
+}
+
 public func imageFromBase64(_ base64Encoded: String?) -> UIImage? {
     if let base64Encoded {
         if let img = imageCache.object(forKey: base64Encoded as NSString) {
@@ -446,7 +451,7 @@ public func getLinkPreview(url: URL, cb: @escaping (LinkPreview?) -> Void) {
                        let resized = resizeImageToStrSizeSync(image, maxDataSize: 14000),
                        let title = metadata.title,
                        let uri = metadata.originalURL {
-                        linkPreview = LinkPreview(uri: uri, title: title, image: resized)
+                        linkPreview = LinkPreview(uri: uri.absoluteString, title: title, image: resized)
                     }
                 }
                 cb(linkPreview)

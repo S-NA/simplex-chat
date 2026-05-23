@@ -4,6 +4,7 @@
 //
 //  Created by Evgeny Poberezkin on 17/01/2022.
 //
+// Spec: spec/client/navigation.md
 
 import SwiftUI
 import Intents
@@ -19,15 +20,18 @@ private enum NoticesSheet: Identifiable {
     }
 }
 
+// Spec: spec/client/navigation.md#ContentView
 struct ContentView: View {
     @EnvironmentObject var chatModel: ChatModel
     @ObservedObject var alertManager = AlertManager.shared
     @ObservedObject var callController = CallController.shared
+    // Spec: spec/client/navigation.md#AppSheetState
     @ObservedObject var appSheetState = AppSheetState.shared
     @Environment(\.colorScheme) var colorScheme
     @EnvironmentObject var theme: AppTheme
     @EnvironmentObject var sceneDelegate: SceneDelegate
 
+    // Spec: spec/client/navigation.md#contentAccessAuthenticationExtended
     var contentAccessAuthenticationExtended: Bool
 
     @Environment(\.scenePhase) var scenePhase
@@ -45,20 +49,9 @@ struct ContentView: View {
     @State private var showChooseLAMode = false
     @State private var showSetPasscode = false
     @State private var waitingForOrPassedAuth = true
-    @State private var chatListActionSheet: ChatListActionSheet? = nil
     @State private var chatListUserPickerSheet: UserPickerSheet? = nil
 
     private let callTopPadding: CGFloat = 40
-
-    private enum ChatListActionSheet: Identifiable {
-        case planAndConnectSheet(sheet: PlanAndConnectActionSheet)
-
-        var id: String {
-            switch self {
-            case let .planAndConnectSheet(sheet): return sheet.id
-            }
-        }
-    }
 
     private var accessAuthenticated: Bool {
         chatModel.contentViewAccessAuthenticated || contentAccessAuthenticationExtended
@@ -74,7 +67,7 @@ struct ContentView: View {
         }
     }
 
-    @ViewBuilder func allViews() -> some View {
+    func allViews() -> some View {
         ZStack {
             let showCallArea = chatModel.activeCall != nil && chatModel.activeCall?.callState != .waitCapabilities && chatModel.activeCall?.callState != .invitationAccepted
             // contentView() has to be in a single branch, so that enabling authentication doesn't trigger re-rendering and close settings.
@@ -172,6 +165,7 @@ struct ContentView: View {
         }
     }
 
+    // Spec: spec/client/navigation.md#contentView
     @ViewBuilder private func contentView() -> some View {
         if let status = chatModel.chatDbStatus, status != .ok {
             DatabaseErrorView(status: status)
@@ -181,17 +175,13 @@ struct ContentView: View {
             if case .onboardingComplete = step,
                chatModel.currentUser != nil {
                 mainView()
-                    .actionSheet(item: $chatListActionSheet) { sheet in
-                        switch sheet {
-                        case let .planAndConnectSheet(sheet): return planAndConnectActionSheet(sheet, dismiss: false)
-                        }
-                    }
             } else {
                 OnboardingView(onboarding: step)
             }
         }
     }
 
+    // Spec: spec/client/navigation.md#callView
     @ViewBuilder private func callView(_ call: Call) -> some View {
         if CallController.useCallKit() {
             ActiveCallView(call: call, canConnectCall: Binding.constant(true))
@@ -209,7 +199,8 @@ struct ContentView: View {
         }
     }
 
-    @ViewBuilder private func activeCallInteractiveArea(_ call: Call) -> some View {
+    // Spec: spec/client/navigation.md#callBanner
+    private func activeCallInteractiveArea(_ call: Call) -> some View {
         HStack {
             Text(call.contact.displayName).font(.body).foregroundColor(.white)
             Spacer()
@@ -243,6 +234,7 @@ struct ContentView: View {
         }
     }
 
+    // Spec: spec/client/navigation.md#lockButton
     private func lockButton() -> some View {
         Button(action: authenticateContentViewAccess) { Label("Unlock", systemImage: "lock") }
     }
@@ -355,6 +347,7 @@ struct ContentView: View {
         }
     }
 
+    // Spec: spec/client/navigation.md#unlockedRecently
     private func unlockedRecently() -> Bool {
         if let lastSuccessfulUnlock = lastSuccessfulUnlock {
             return ProcessInfo.processInfo.systemUptime - lastSuccessfulUnlock < 2
@@ -442,25 +435,37 @@ struct ContentView: View {
         )
     }
 
+    // Spec: spec/client/navigation.md#connectViaUrl
     func connectViaUrl() {
         let m = ChatModel.shared
         if let url = m.appOpenUrl {
             m.appOpenUrl = nil
-            dismissAllSheets() {
-                var path = url.path
-                if (path == "/contact" || path == "/invitation" || path == "/a" || path == "/c" || path == "/g" || path == "/i") {
-                    path.removeFirst()
-                    let link = url.absoluteString.replacingOccurrences(of: "///\(path)", with: "/\(path)")
-                    planAndConnect(
-                        link,
-                        showAlert: showPlanAndConnectAlert,
-                        showActionSheet: { chatListActionSheet = .planAndConnectSheet(sheet: $0) },
-                        dismiss: false,
-                        incognito: nil
-                    )
-                } else {
-                    AlertManager.shared.showAlert(Alert(title: Text("Error: URL is invalid")))
-                }
+            connectViaUrl_(url)
+        } else if let url = m.appOpenUrlLater, AppChatState.shared.value == .active, scenePhase == .active {
+            // correcting branch in case .onChange(of: scenePhase) in SimpleXApp doesn't trigger and transfer appOpenUrlLater into appOpenUrl
+            m.appOpenUrlLater = nil
+            connectViaUrl_(url)
+        }
+    }
+
+    func connectViaUrl_(_ url: URL) {
+        dismissAllSheets() {
+            var path = url.path
+            if path == "/r" {
+                showAlert(
+                    NSLocalizedString("Relay address", comment: "alert title"),
+                    message: NSLocalizedString("This is a chat relay address, it cannot be used to connect.", comment: "alert message")
+                )
+            } else if (path == "/contact" || path == "/invitation" || path == "/a" || path == "/c" || path == "/g" || path == "/i") {
+                path.removeFirst()
+                let link = url.absoluteString.replacingOccurrences(of: "///\(path)", with: "/\(path)")
+                planAndConnect(
+                    link,
+                    theme: theme,
+                    dismiss: false
+                )
+            } else {
+                AlertManager.shared.showAlert(Alert(title: Text("Error: URL is invalid")))
             }
         }
     }
@@ -478,10 +483,6 @@ struct ContentView: View {
                 ))
             }
         }
-    }
-
-    private func showPlanAndConnectAlert(_ alert: PlanAndConnectAlert) {
-        AlertManager.shared.showAlert(planAndConnectAlert(alert, dismiss: false))
     }
 }
 

@@ -34,7 +34,7 @@ import chat.simplex.common.views.newchat.*
 import chat.simplex.common.views.usersettings.SettingsActionItem
 import chat.simplex.common.model.GroupInfo
 import chat.simplex.common.platform.*
-import chat.simplex.common.views.chatlist.openLoadedChat
+import chat.simplex.common.views.chatlist.openDirectChat
 import chat.simplex.res.MR
 import dev.icerock.moko.resources.StringResource
 import kotlinx.datetime.Clock
@@ -45,17 +45,24 @@ fun GroupMemberInfoView(
   rhId: Long?,
   groupInfo: GroupInfo,
   member: GroupMember,
+  scrollToItemId: MutableState<Long?>,
   connectionStats: ConnectionStats?,
   connectionCode: String?,
   chatModel: ChatModel,
+  openedFromSupportChat: Boolean,
+  groupRelay: GroupRelay? = null,
   close: () -> Unit,
   closeAll: () -> Unit, // Close all open windows up to ChatView
 ) {
+  KeyChangeEffect(chat.simplex.common.platform.chatModel.chatId.value) {
+    ModalManager.end.closeModals()
+  }
   BackHandler(onBack = close)
   val chat = chatModel.chats.value.firstOrNull { ch -> ch.id == chatModel.chatId.value && ch.remoteHostId == rhId }
   val connStats = remember { mutableStateOf(connectionStats) }
   val developerTools = chatModel.controller.appPrefs.developerTools.get()
   var progressIndicator by remember { mutableStateOf(false) }
+  val scope = rememberCoroutineScope()
 
   fun syncMemberConnection() {
     withBGApi {
@@ -79,17 +86,17 @@ fun GroupMemberInfoView(
       rhId = rhId,
       groupInfo,
       member,
+      scrollToItemId,
       connStats,
       newRole,
       developerTools,
       connectionCode,
+      groupRelay = groupRelay,
       getContactChat = { chatModel.getContactChat(it) },
-      openDirectChat = {
-        withBGApi {
-          apiLoadMessages(chatModel.chatsContext, rhId, ChatType.Direct, it, ChatPagination.Initial(ChatPagination.INITIAL_COUNT))
-          if (chatModel.getContactChat(it) != null) {
-            closeAll()
-          }
+      openDirectChat = { contactId ->
+        scope.launch {
+          openDirectChat(rhId, contactId)
+          closeAll()
         }
       },
       createMemberContact = {
@@ -102,9 +109,8 @@ fun GroupMemberInfoView(
               withContext(Dispatchers.Main) {
                 chatModel.chatsContext.addChat(memberChat)
               }
-              openLoadedChat(memberChat)
+              openDirectChat(rhId, memberContact.contactId)
               closeAll()
-              chatModel.setContactNetworkStatus(memberContact, NetworkStatus.Connected())
             }
             progressIndicator = false
           }
@@ -132,6 +138,7 @@ fun GroupMemberInfoView(
       blockForAll = { blockForAllAlert(rhId, groupInfo, member) },
       unblockForAll = { unblockForAllAlert(rhId, groupInfo, member) },
       removeMember = { removeMemberDialog(rhId, groupInfo, member, chatModel, close) },
+      deleteMemberMessages = { deleteMemberMessagesDialog(rhId, groupInfo, member, chatModel, close) },
       onRoleSelected = {
         if (it == newRole.value) return@GroupMemberInfoLayout
         val prevValue = newRole.value
@@ -224,7 +231,8 @@ fun GroupMemberInfoView(
             )
           }
         }
-      }
+      },
+      openedFromSupportChat = openedFromSupportChat
     )
 
     if (progressIndicator) {
@@ -234,34 +242,117 @@ fun GroupMemberInfoView(
 }
 
 fun removeMemberDialog(rhId: Long?, groupInfo: GroupInfo, member: GroupMember, chatModel: ChatModel, close: (() -> Unit)? = null) {
-  val messageId = if (groupInfo.businessChat == null)
-    MR.strings.member_will_be_removed_from_group_cannot_be_undone
-  else
-    MR.strings.member_will_be_removed_from_chat_cannot_be_undone
-  AlertManager.shared.showAlertDialog(
-    title = generalGetString(MR.strings.button_remove_member),
-    text = generalGetString(messageId),
-    confirmText = generalGetString(MR.strings.remove_member_confirmation),
-    onConfirm = {
-      withBGApi {
-        val removedMembers = chatModel.controller.apiRemoveMembers(rhId, member.groupId, listOf(member.groupMemberId))
-        if (removedMembers != null) {
-          withContext(Dispatchers.Main) {
-            removedMembers.forEach { removedMember ->
-              chatModel.chatsContext.upsertGroupMember(rhId, groupInfo, removedMember)
-            }
+  if (member.memberRole == GroupMemberRole.Relay) {
+    val isLastActive = groupInfo.useRelays && run {
+      val activeRelays = chatModel.groupMembers.value.filter { it.memberRole == GroupMemberRole.Relay && it.memberCurrent }
+      activeRelays.size <= 1
+    }
+    val message = if (isLastActive) generalGetString(MR.strings.last_active_relay_warning)
+      else generalGetString(MR.strings.relay_will_be_removed_from_channel)
+    AlertManager.shared.showAlertDialogButtonsColumn(
+      generalGetString(MR.strings.button_remove_relay_question),
+      message,
+      buttons = {
+        Column {
+          SectionItemView({
+            AlertManager.shared.hideAlert()
+            removeMember(rhId, groupInfo, member, withMessages = false, chatModel, close)
+          }) {
+            Text(generalGetString(MR.strings.remove_member_confirmation), Modifier.fillMaxWidth(), textAlign = TextAlign.Center, color = Color.Red)
           }
-          withContext(Dispatchers.Main) {
-            removedMembers.forEach { removedMember ->
-              chatModel.secondaryChatsContext.value?.upsertGroupMember(rhId, groupInfo, removedMember)
-            }
+          SectionItemView({
+            AlertManager.shared.hideAlert()
+          }) {
+            Text(generalGetString(MR.strings.cancel_verb), Modifier.fillMaxWidth(), textAlign = TextAlign.Center, color = MaterialTheme.colors.primary)
           }
         }
-        close?.invoke()
-      }
+      })
+  } else if (groupInfo.useRelays) {
+    AlertManager.shared.showAlertDialogButtonsColumn(
+      generalGetString(MR.strings.button_remove_subscriber_question),
+      generalGetString(MR.strings.subscriber_will_be_removed_from_channel_cannot_be_undone),
+      buttons = {
+        Column {
+          SectionItemView({
+            AlertManager.shared.hideAlert()
+            removeMember(rhId, groupInfo, member, withMessages = false, chatModel, close)
+          }) {
+            Text(generalGetString(MR.strings.remove_member_confirmation), Modifier.fillMaxWidth(), textAlign = TextAlign.Center, color = Color.Red)
+          }
+          SectionItemView({
+            AlertManager.shared.hideAlert()
+            removeMember(rhId, groupInfo, member, withMessages = true, chatModel, close)
+          }) {
+            Text(generalGetString(MR.strings.remove_member_delete_messages_confirmation), Modifier.fillMaxWidth(), textAlign = TextAlign.Center, color = Color.Red)
+          }
+          SectionItemView({
+            AlertManager.shared.hideAlert()
+          }) {
+            Text(generalGetString(MR.strings.cancel_verb), Modifier.fillMaxWidth(), textAlign = TextAlign.Center, color = MaterialTheme.colors.primary)
+          }
+        }
+      })
+  } else {
+    val messageId = if (groupInfo.businessChat == null)
+      MR.strings.member_will_be_removed_from_group_cannot_be_undone
+    else
+      MR.strings.member_will_be_removed_from_chat_cannot_be_undone
+    AlertManager.shared.showAlertDialogButtonsColumn(
+      generalGetString(MR.strings.button_remove_member_question),
+      generalGetString(messageId),
+      buttons = {
+        Column {
+          SectionItemView({
+            AlertManager.shared.hideAlert()
+            removeMember(rhId, groupInfo, member, withMessages = false, chatModel, close)
+          }) {
+            Text(generalGetString(MR.strings.remove_member_confirmation), Modifier.fillMaxWidth(), textAlign = TextAlign.Center, color = Color.Red)
+          }
+          SectionItemView({
+            AlertManager.shared.hideAlert()
+            removeMember(rhId, groupInfo, member, withMessages = true, chatModel, close)
+          }) {
+            Text(generalGetString(MR.strings.remove_member_delete_messages_confirmation), Modifier.fillMaxWidth(), textAlign = TextAlign.Center, color = Color.Red)
+          }
+          SectionItemView({
+            AlertManager.shared.hideAlert()
+          }) {
+            Text(generalGetString(MR.strings.cancel_verb), Modifier.fillMaxWidth(), textAlign = TextAlign.Center, color = MaterialTheme.colors.primary)
+          }
+        }
+      })
+  }
+}
+
+fun deleteMemberMessagesDialog(rhId: Long?, groupInfo: GroupInfo, member: GroupMember, chatModel: ChatModel, close: (() -> Unit)? = null) {
+  AlertManager.shared.showAlertDialog(
+    title = generalGetString(MR.strings.button_delete_member_messages_question),
+    text = generalGetString(MR.strings.member_messages_will_be_deleted_cannot_be_undone),
+    confirmText = generalGetString(MR.strings.delete_member_messages_confirmation),
+    onConfirm = {
+      removeMember(rhId, groupInfo, member, withMessages = true, chatModel, close)
     },
     destructive = true,
   )
+}
+
+fun removeMember(rhId: Long?, groupInfo: GroupInfo, member: GroupMember, withMessages: Boolean, chatModel: ChatModel, close: (() -> Unit)? = null) {
+  withBGApi {
+    val r = chatModel.controller.apiRemoveMembers(rhId, member.groupId, listOf(member.groupMemberId), withMessages = withMessages)
+    if (r != null) {
+      val (updatedGroupInfo, removedMembers) = r
+      withContext(Dispatchers.Main) {
+        chatModel.chatsContext.updateGroup(rhId, updatedGroupInfo)
+        removedMembers.forEach { removedMember ->
+          chatModel.chatsContext.upsertGroupMember(rhId, updatedGroupInfo, removedMember)
+          if (withMessages) {
+            chat.simplex.common.platform.chatModel.chatsContext.removeMemberItems(rhId, removedMember, byMember = groupInfo.membership, groupInfo)
+          }
+        }
+      }
+    }
+    close?.invoke()
+  }
 }
 
 @Composable
@@ -269,10 +360,12 @@ fun GroupMemberInfoLayout(
   rhId: Long?,
   groupInfo: GroupInfo,
   member: GroupMember,
+  scrollToItemId: MutableState<Long?>,
   connStats: MutableState<ConnectionStats?>,
   newRole: MutableState<GroupMemberRole>,
   developerTools: Boolean,
   connectionCode: String?,
+  groupRelay: GroupRelay? = null,
   getContactChat: (Long) -> Chat?,
   openDirectChat: (Long) -> Unit,
   createMemberContact: () -> Unit,
@@ -282,12 +375,14 @@ fun GroupMemberInfoLayout(
   blockForAll: () -> Unit,
   unblockForAll: () -> Unit,
   removeMember: () -> Unit,
+  deleteMemberMessages: () -> Unit,
   onRoleSelected: (GroupMemberRole) -> Unit,
   switchMemberAddress: () -> Unit,
   abortSwitchMemberAddress: () -> Unit,
   syncMemberConnection: () -> Unit,
   syncMemberConnectionForce: () -> Unit,
   verifyClicked: () -> Unit,
+  openedFromSupportChat: Boolean
 ) {
   val cStats = connStats.value
   fun knownDirectChat(contactId: Long): Pair<Chat, Contact>? {
@@ -300,9 +395,33 @@ fun GroupMemberInfoLayout(
   }
 
   @Composable
+  fun SupportChatButton() {
+    val scope = rememberCoroutineScope()
+
+    SettingsActionItem(
+      painterResource(MR.images.ic_flag),
+      stringResource(MR.strings.button_support_chat_member),
+      click = {
+        val scopeInfo = GroupChatScopeInfo.MemberSupport(groupMember_ = member)
+        val supportChatInfo = ChatInfo.Group(groupInfo, groupChatScope = scopeInfo)
+        scope.launch {
+          showMemberSupportChatView(
+            chatModel.chatId,
+            scrollToItemId = scrollToItemId,
+            supportChatInfo,
+            scopeInfo
+          )
+        }
+      },
+      iconColor = MaterialTheme.colors.secondary,
+    )
+  }
+
+  @Composable
   fun ModeratorDestructiveSection() {
     val canBlockForAll = member.canBlockForAll(groupInfo)
-    val canRemove = member.canBeRemoved(groupInfo)
+    // TODO [relays] re-enable when relay management ships
+    val canRemove = member.canBeRemoved(groupInfo) && member.memberRole != GroupMemberRole.Relay
     if (canBlockForAll || canRemove) {
       SectionDividerSpaced(maxBottomPadding = false)
       SectionView {
@@ -314,7 +433,11 @@ fun GroupMemberInfoLayout(
           }
         }
         if (canRemove) {
-          RemoveMemberButton(removeMember)
+          if (member.memberStatus != GroupMemberStatus.MemRemoved && (member.memberStatus != GroupMemberStatus.MemLeft || member.memberRole == GroupMemberRole.Relay)) {
+            RemoveMemberButton(groupInfo.useRelays, member.memberRole == GroupMemberRole.Relay, removeMember)
+          } else if (member.memberRole != GroupMemberRole.Relay) {
+            DeleteMemberMessagesButton(deleteMemberMessages)
+          }
         }
       }
     }
@@ -350,70 +473,81 @@ fun GroupMemberInfoLayout(
 
     val contactId = member.memberContactId
 
-    Box(
-      Modifier.fillMaxWidth(),
-      contentAlignment = Alignment.Center
-    ) {
-      Row(
-        Modifier
-          .widthIn(max = 320.dp)
-          .padding(horizontal = DEFAULT_PADDING),
-        horizontalArrangement = Arrangement.SpaceEvenly,
-        verticalAlignment = Alignment.CenterVertically
+    if (!groupInfo.useRelays) {
+      Box(
+        Modifier.fillMaxWidth(),
+        contentAlignment = Alignment.Center
       ) {
-        val knownChat = if (contactId != null) knownDirectChat(contactId) else null
-        if (knownChat != null) {
-          val (chat, contact) = knownChat
-          val knownContactConnectionStats: MutableState<ConnectionStats?> = remember { mutableStateOf(null) }
+        Row(
+          Modifier
+            .widthIn(max = 320.dp)
+            .padding(horizontal = DEFAULT_PADDING),
+          horizontalArrangement = Arrangement.SpaceEvenly,
+          verticalAlignment = Alignment.CenterVertically
+        ) {
+          val knownChat = if (contactId != null) knownDirectChat(contactId) else null
+          if (knownChat != null) {
+            val (chat, contact) = knownChat
+            val knownContactConnectionStats: MutableState<ConnectionStats?> = remember { mutableStateOf(null) }
 
-          LaunchedEffect(contact.contactId) {
-            withBGApi {
-              val contactInfo = chatModel.controller.apiContactInfo(chat.remoteHostId, chat.chatInfo.apiId)
-              if (contactInfo != null) {
-                knownContactConnectionStats.value = contactInfo.first
+            LaunchedEffect(contact.contactId) {
+              withBGApi {
+                val contactInfo = chatModel.controller.apiContactInfo(chat.remoteHostId, chat.chatInfo.apiId)
+                if (contactInfo != null) {
+                  knownContactConnectionStats.value = contactInfo.first
+                }
               }
             }
-          }
 
-          OpenChatButton(modifier = Modifier.fillMaxWidth(0.33f), onClick = { openDirectChat(contact.contactId) })
-          AudioCallButton(modifier = Modifier.fillMaxWidth(0.5f), chat, contact, knownContactConnectionStats)
-          VideoButton(modifier = Modifier.fillMaxWidth(1f), chat, contact, knownContactConnectionStats)
-        } else if (groupInfo.fullGroupPreferences.directMessages.on(groupInfo.membership)) {
-          if (contactId != null) {
-            OpenChatButton(modifier = Modifier.fillMaxWidth(0.33f), onClick = { openDirectChat(contactId) }) // legacy - only relevant for direct contacts created when joining group
-          } else {
-            OpenChatButton(
-              modifier = Modifier.fillMaxWidth(0.33f),
-              disabledLook = !(member.sendMsgEnabled || (member.activeConn?.connectionStats?.ratchetSyncAllowed ?: false)),
-              onClick = { createMemberContact() }
-            )
+            OpenChatButton(modifier = Modifier.fillMaxWidth(0.33f), onClick = { openDirectChat(contact.contactId) })
+            AudioCallButton(modifier = Modifier.fillMaxWidth(0.5f), chat, contact, knownContactConnectionStats)
+            VideoButton(modifier = Modifier.fillMaxWidth(1f), chat, contact, knownContactConnectionStats)
+          } else if (groupInfo.fullGroupPreferences.directMessages.on(groupInfo.membership)) {
+            if (contactId != null) {
+              OpenChatButton(modifier = Modifier.fillMaxWidth(0.33f), onClick = { openDirectChat(contactId) }) // legacy - only relevant for direct contacts created when joining group
+            } else {
+              OpenChatButton(
+                modifier = Modifier.fillMaxWidth(0.33f),
+                disabledLook = !(member.sendMsgEnabled || (member.activeConn?.connectionStats?.ratchetSyncAllowed ?: false)),
+                onClick = { createMemberContact() }
+              )
+            }
+            InfoViewActionButton(modifier = Modifier.fillMaxWidth(0.5f), painterResource(MR.images.ic_call), generalGetString(MR.strings.info_view_call_button), disabled = false, disabledLook = true, onClick = {
+              showSendMessageToEnableCallsAlert()
+            })
+            InfoViewActionButton(modifier = Modifier.fillMaxWidth(1f), painterResource(MR.images.ic_videocam), generalGetString(MR.strings.info_view_video_button), disabled = false, disabledLook = true, onClick = {
+              showSendMessageToEnableCallsAlert()
+            })
+          } else { // no known contact chat && directMessages are off
+            val messageId = if (groupInfo.businessChat == null) MR.strings.direct_messages_are_prohibited_in_group else MR.strings.direct_messages_are_prohibited_in_chat
+            InfoViewActionButton(modifier = Modifier.fillMaxWidth(0.33f), painterResource(MR.images.ic_chat_bubble), generalGetString(MR.strings.info_view_message_button), disabled = false, disabledLook = true, onClick = {
+              showDirectMessagesProhibitedAlert(generalGetString(MR.strings.cant_send_message_to_member_alert_title), messageId)
+            })
+            InfoViewActionButton(modifier = Modifier.fillMaxWidth(0.5f), painterResource(MR.images.ic_call), generalGetString(MR.strings.info_view_call_button), disabled = false, disabledLook = true, onClick = {
+              showDirectMessagesProhibitedAlert(generalGetString(MR.strings.cant_call_member_alert_title), messageId)
+            })
+            InfoViewActionButton(modifier = Modifier.fillMaxWidth(1f), painterResource(MR.images.ic_videocam), generalGetString(MR.strings.info_view_video_button), disabled = false, disabledLook = true, onClick = {
+              showDirectMessagesProhibitedAlert(generalGetString(MR.strings.cant_call_member_alert_title), messageId)
+            })
           }
-          InfoViewActionButton(modifier = Modifier.fillMaxWidth(0.5f), painterResource(MR.images.ic_call), generalGetString(MR.strings.info_view_call_button), disabled = false, disabledLook = true, onClick = {
-            showSendMessageToEnableCallsAlert()
-          })
-          InfoViewActionButton(modifier = Modifier.fillMaxWidth(1f), painterResource(MR.images.ic_videocam), generalGetString(MR.strings.info_view_video_button), disabled = false, disabledLook = true, onClick = {
-            showSendMessageToEnableCallsAlert()
-          })
-        } else { // no known contact chat && directMessages are off
-          val messageId = if (groupInfo.businessChat == null) MR.strings.direct_messages_are_prohibited_in_group else MR.strings.direct_messages_are_prohibited_in_chat
-          InfoViewActionButton(modifier = Modifier.fillMaxWidth(0.33f), painterResource(MR.images.ic_chat_bubble), generalGetString(MR.strings.info_view_message_button), disabled = false, disabledLook = true, onClick = {
-            showDirectMessagesProhibitedAlert(generalGetString(MR.strings.cant_send_message_to_member_alert_title), messageId)
-          })
-          InfoViewActionButton(modifier = Modifier.fillMaxWidth(0.5f), painterResource(MR.images.ic_call), generalGetString(MR.strings.info_view_call_button), disabled = false, disabledLook = true, onClick = {
-            showDirectMessagesProhibitedAlert(generalGetString(MR.strings.cant_call_member_alert_title), messageId)
-          })
-          InfoViewActionButton(modifier = Modifier.fillMaxWidth(1f), painterResource(MR.images.ic_videocam), generalGetString(MR.strings.info_view_video_button), disabled = false, disabledLook = true, onClick = {
-            showDirectMessagesProhibitedAlert(generalGetString(MR.strings.cant_call_member_alert_title), messageId)
-          })
         }
       }
+
+      SectionSpacer()
     }
 
-    SectionSpacer()
+    val showMemberSupportChat = !openedFromSupportChat &&
+      groupInfo.membership.memberRole >= GroupMemberRole.Moderator &&
+      member.memberRole != GroupMemberRole.Relay &&
+      ((groupInfo.fullGroupPreferences.support.on && member.memberRole < GroupMemberRole.Moderator)
+        || member.supportChat != null)
 
     if (member.memberActive) {
       SectionView {
-        if (connectionCode != null) {
+        if (showMemberSupportChat) {
+          SupportChatButton()
+        }
+        if (connectionCode != null && !(groupInfo.useRelays && member.memberRole == GroupMemberRole.Relay)) {
           VerifyCodeButton(member.verified, verifyClicked)
         }
         if (cStats != null && cStats.ratchetSyncAllowed) {
@@ -422,6 +556,11 @@ fun GroupMemberInfoLayout(
 //        } else if (developerTools) {
 //          SynchronizeConnectionButtonForce(syncMemberConnectionForce)
 //        }
+      }
+      SectionDividerSpaced()
+    } else if (groupInfo.useRelays && member.memberCurrent && showMemberSupportChat) {
+      SectionView {
+        SupportChatButton()
       }
       SectionDividerSpaced()
     }
@@ -443,19 +582,64 @@ fun GroupMemberInfoLayout(
       SectionDividerSpaced()
     }
 
-    SectionView(title = stringResource(MR.strings.member_info_section_title_member)) {
-      val titleId = if (groupInfo.businessChat == null) MR.strings.info_row_group else MR.strings.info_row_chat
+    val memberSectionTitle = if (groupInfo.useRelays) {
+      when (member.memberRole) {
+        GroupMemberRole.Relay -> stringResource(MR.strings.member_info_section_title_relay)
+        GroupMemberRole.Owner -> stringResource(MR.strings.member_info_section_title_owner)
+        else -> stringResource(MR.strings.member_info_section_title_subscriber)
+      }
+    } else {
+      stringResource(MR.strings.member_info_section_title_member)
+    }
+    SectionView(title = memberSectionTitle) {
+      val titleId = if (groupInfo.useRelays) MR.strings.info_row_channel
+        else if (groupInfo.businessChat == null) MR.strings.info_row_group
+        else MR.strings.info_row_chat
       InfoRow(stringResource(titleId), groupInfo.displayName)
-      val roles = remember { member.canChangeRoleTo(groupInfo) }
-      if (roles != null) {
-        RoleSelectionRow(roles, newRole, onRoleSelected)
+      if (!groupInfo.useRelays) {
+        val roles = remember { member.canChangeRoleTo(groupInfo) }
+        if (roles != null) {
+          RoleSelectionRow(roles, newRole, onRoleSelected)
+        } else {
+          InfoRow(stringResource(MR.strings.role_in_group), member.memberRole.text)
+        }
       } else {
         InfoRow(stringResource(MR.strings.role_in_group), member.memberRole.text)
       }
+      val relayLink = member.relayLink
+      if (relayLink != null) {
+        InfoRow(stringResource(MR.strings.info_row_relay_link), String.format(generalGetString(MR.strings.via_relay_hostname), hostFromRelayLink(relayLink)))
+      }
+      val relayAddress = groupRelay?.userChatRelay?.address
+      if (relayAddress != null) {
+        InfoRow(stringResource(MR.strings.info_row_relay_address), String.format(generalGetString(MR.strings.via_relay_hostname), hostFromRelayLink(relayAddress)))
+        val clipboard = LocalClipboardManager.current
+        ShareRelayAddressButton { clipboard.shareText(simplexChatLink(relayAddress)) }
+      }
+      if (groupRelay?.relayStatus == RelayStatus.Rejected) {
+        InfoRow(stringResource(MR.strings.member_info_status), stringResource(MR.strings.member_info_relay_status_rejected_by_operator))
+      }
+    }
+    if (groupInfo.useRelays && member.memberRole == GroupMemberRole.Relay) {
+      SectionTextFooter(
+        if (groupInfo.isOwner) stringResource(MR.strings.relay_section_footer_owner)
+        else stringResource(MR.strings.relay_section_footer_subscriber)
+      )
     }
     if (cStats != null) {
       SectionDividerSpaced()
       SectionView(title = stringResource(MR.strings.conn_stats_section_title_servers)) {
+        val subStatus = cStats.subStatus
+        if (subStatus != null) {
+          SectionItemView({
+            AlertManager.shared.showAlertMsg(
+              generalGetString(MR.strings.network_status),
+              subStatus.statusExplanation
+            )
+          }) {
+            SubStatusRow(subStatus)
+          }
+        }
         SwitchAddressButton(
           disabled = cStats.rcvQueuesInfo.any { it.rcvSwitchStatus != null } || !member.sendMsgEnabled,
           switchAddress = switchMemberAddress
@@ -477,9 +661,22 @@ fun GroupMemberInfoLayout(
       }
     }
 
+    val connFailedErr = member.activeConn?.connFailedErr
+    if (connFailedErr != null) {
+      SectionDividerSpaced()
+      SectionView(title = stringResource(MR.strings.info_row_connection_failed), icon = painterResource(MR.images.ic_warning), iconTint = Color.Red, leadingIcon = true) {
+        SectionItemView {
+          Text(
+            connFailedErr,
+            color = MaterialTheme.colors.secondary
+          )
+        }
+      }
+    }
+
     if (groupInfo.membership.memberRole >= GroupMemberRole.Moderator) {
       ModeratorDestructiveSection()
-    } else {
+    } else if (!groupInfo.useRelays) {
       NonAdminBlockSection()
     }
 
@@ -495,18 +692,20 @@ fun GroupMemberInfoLayout(
             else String.format(generalGetString(MR.strings.conn_level_desc_indirect), conn.connLevel)
           InfoRow(stringResource(MR.strings.info_row_connection), connLevelDesc)
         }
-        SectionItemView({
-          withBGApi {
-            val info = controller.apiGroupMemberQueueInfo(rhId, groupInfo.apiId, member.groupMemberId)
-            if (info != null) {
-              AlertManager.shared.showAlertMsg(
-                title = generalGetString(MR.strings.message_queue_info),
-                text = queueInfoText(info)
-              )
+        if (!groupInfo.useRelays || member.memberRole == GroupMemberRole.Relay) {
+          SectionItemView({
+            withBGApi {
+              val info = controller.apiGroupMemberQueueInfo(rhId, groupInfo.apiId, member.groupMemberId)
+              if (info != null) {
+                AlertManager.shared.showAlertMsg(
+                  title = generalGetString(MR.strings.message_queue_info),
+                  text = queueInfoText(info)
+                )
+              }
             }
+          }) {
+            Text(stringResource(MR.strings.info_row_debug_delivery))
           }
-        }) {
-          Text(stringResource(MR.strings.info_row_debug_delivery))
         }
       }
     }
@@ -535,11 +734,12 @@ fun GroupMemberInfoHeader(member: GroupMember) {
     horizontalAlignment = Alignment.CenterHorizontally
   ) {
     MemberProfileImage(size = 192.dp, member, color = if (isInDarkTheme()) GroupDark else SettingsSecondaryLight)
+    val displayName = member.displayName.trim() // alias if set
     val text = buildAnnotatedString {
       if (member.verified) {
         appendInlineContent(id = "shieldIcon")
       }
-      append(member.displayName)
+      append(displayName)
     }
     val inlineContent: Map<String, InlineTextContent> = mapOf(
       "shieldIcon" to InlineTextContent(
@@ -549,10 +749,11 @@ fun GroupMemberInfoHeader(member: GroupMember) {
       }
     )
     val clipboard = LocalClipboardManager.current
-    val copyNameToClipboard = {
-      clipboard.setText(AnnotatedString(member.displayName))
+    val copyNameToClipboard = fun(name: String) {
+      clipboard.setText(AnnotatedString(name))
       showToast(generalGetString(MR.strings.copied))
     }
+    val copyDisplayName = { copyNameToClipboard(displayName) }
     Text(
       text,
       inlineContent = inlineContent,
@@ -560,18 +761,10 @@ fun GroupMemberInfoHeader(member: GroupMember) {
       textAlign = TextAlign.Center,
       maxLines = 3,
       overflow = TextOverflow.Ellipsis,
-      modifier = Modifier.combinedClickable(onClick = copyNameToClipboard, onLongClick = copyNameToClipboard).onRightClick(copyNameToClipboard)
+      modifier = Modifier.combinedClickable(onClick = copyDisplayName, onLongClick = copyDisplayName).onRightClick(copyDisplayName)
     )
-    if (member.fullName != "" && member.fullName != member.displayName) {
-      Text(
-        member.fullName, style = MaterialTheme.typography.h2,
-        color = MaterialTheme.colors.onBackground,
-        textAlign = TextAlign.Center,
-        maxLines = 4,
-        overflow = TextOverflow.Ellipsis,
-        modifier = Modifier.combinedClickable(onClick = copyNameToClipboard, onLongClick = copyNameToClipboard).onRightClick(copyNameToClipboard)
-      )
-    }
+    // passing actual display name here, as alias is used above
+    ChatInfoDescription(member, member.memberProfile.displayName.trim(), copyNameToClipboard)
   }
 }
 
@@ -616,13 +809,38 @@ fun UnblockForAllButton(onClick: () -> Unit) {
 }
 
 @Composable
-fun RemoveMemberButton(onClick: () -> Unit) {
+fun RemoveMemberButton(useRelays: Boolean = false, isRelay: Boolean = false, onClick: () -> Unit) {
+  val label = if (isRelay) MR.strings.button_remove_relay
+    else if (useRelays) MR.strings.button_remove_subscriber
+    else MR.strings.button_remove_member
   SettingsActionItem(
     painterResource(MR.images.ic_delete),
-    stringResource(MR.strings.button_remove_member),
+    stringResource(label),
     click = onClick,
     textColor = Color.Red,
     iconColor = Color.Red,
+  )
+}
+
+@Composable
+fun DeleteMemberMessagesButton(onClick: () -> Unit) {
+  SettingsActionItem(
+    painterResource(MR.images.ic_delete),
+    stringResource(MR.strings.button_delete_member_messages),
+    click = onClick,
+    textColor = Color.Red,
+    iconColor = Color.Red,
+  )
+}
+
+@Composable
+fun ShareRelayAddressButton(onClick: () -> Unit) {
+  SettingsActionItem(
+    painterResource(MR.images.ic_share_filled),
+    stringResource(MR.strings.share_relay_address),
+    onClick,
+    iconColor = MaterialTheme.colors.primary,
+    textColor = MaterialTheme.colors.primary,
   )
 }
 
@@ -681,14 +899,16 @@ fun MemberProfileImage(
   size: Dp,
   mem: GroupMember,
   color: Color = MaterialTheme.colors.secondaryVariant,
-  backgroundColor: Color? = null
+  backgroundColor: Color? = null,
+  async: Boolean = false
 ) {
   ProfileImage(
     size = size,
     image = mem.image,
     color = color,
     backgroundColor = backgroundColor,
-    blurred = mem.blocked
+    blurred = mem.blocked,
+    async = async
   )
 }
 
@@ -755,7 +975,7 @@ fun updateMembersRoleDialog(
 fun connectViaMemberAddressAlert(rhId: Long?, connReqUri: String) {
   try {
     withBGApi {
-      planAndConnect(rhId, connReqUri, incognito = null, close = { ModalManager.closeAllModalsEverywhere() })
+      planAndConnect(rhId, connReqUri, close = { ModalManager.closeAllModalsEverywhere() })
     }
   } catch (e: RuntimeException) {
     AlertManager.shared.showAlertMsg(
@@ -808,8 +1028,9 @@ fun updateMemberSettings(rhId: Long?, gInfo: GroupInfo, member: GroupMember, mem
 }
 
 fun blockForAllAlert(rhId: Long?, gInfo: GroupInfo, mem: GroupMember) {
+  val titleId = if (gInfo.useRelays) MR.strings.block_subscriber_for_all_question else MR.strings.block_for_all_question
   AlertManager.shared.showAlertDialog(
-    title = generalGetString(MR.strings.block_for_all_question),
+    title = generalGetString(titleId),
     text = generalGetString(MR.strings.block_member_desc).format(mem.chatViewName),
     confirmText = generalGetString(MR.strings.block_for_all),
     onConfirm = {
@@ -832,8 +1053,9 @@ fun blockForAllAlert(rhId: Long?, gInfo: GroupInfo, memberIds: List<Long>, onSuc
 }
 
 fun unblockForAllAlert(rhId: Long?, gInfo: GroupInfo, mem: GroupMember) {
+  val titleId = if (gInfo.useRelays) MR.strings.unblock_subscriber_for_all_question else MR.strings.unblock_for_all_question
   AlertManager.shared.showAlertDialog(
-    title = generalGetString(MR.strings.unblock_for_all_question),
+    title = generalGetString(titleId),
     text = generalGetString(MR.strings.unblock_member_desc).format(mem.chatViewName),
     confirmText = generalGetString(MR.strings.unblock_for_all),
     onConfirm = {
@@ -878,6 +1100,7 @@ fun PreviewGroupMemberInfoLayout() {
       rhId = null,
       groupInfo = GroupInfo.sampleData,
       member = GroupMember.sampleData,
+      scrollToItemId = remember { mutableStateOf(null) },
       connStats = remember { mutableStateOf(null) },
       newRole = remember { mutableStateOf(GroupMemberRole.Member) },
       developerTools = false,
@@ -891,12 +1114,14 @@ fun PreviewGroupMemberInfoLayout() {
       blockForAll = {},
       unblockForAll = {},
       removeMember = {},
+      deleteMemberMessages = {},
       onRoleSelected = {},
       switchMemberAddress = {},
       abortSwitchMemberAddress = {},
       syncMemberConnection = {},
       syncMemberConnectionForce = {},
       verifyClicked = {},
+      openedFromSupportChat = false,
     )
   }
 }

@@ -5,6 +5,7 @@
 //  Created by spaced4ndy on 28.04.2023.
 //  Copyright © 2023 SimpleX Chat. All rights reserved.
 //
+// Spec: spec/client/navigation.md
 
 import SwiftUI
 import Contacts
@@ -77,9 +78,10 @@ struct CreateSimpleXAddress: View {
                 progressIndicator = true
                 Task {
                     do {
-                        let connLinkContact = try await apiCreateUserAddress(short: false)
-                        DispatchQueue.main.async {
-                            m.userAddress = UserContactLink(connLinkContact: connLinkContact)
+                        if let connLinkContact = try await apiCreateUserAddress() {
+                            DispatchQueue.main.async {
+                                m.userAddress = UserContactLink(connLinkContact)
+                            }
                         }
                         await MainActor.run { progressIndicator = false }
                     } catch let error {

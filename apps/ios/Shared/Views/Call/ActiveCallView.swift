@@ -5,12 +5,14 @@
 //  Created by Evgeny on 05/05/2022.
 //  Copyright © 2022 SimpleX Chat. All rights reserved.
 //
+// Spec: spec/services/calls.md
 
 import SwiftUI
 import WebKit
 import SimpleXChat
 import AVFoundation
 
+// Spec: spec/services/calls.md#ActiveCallView
 struct ActiveCallView: View {
     @EnvironmentObject var m: ChatModel
     @Environment(\.colorScheme) var colorScheme
@@ -243,7 +245,7 @@ struct ActiveCallView: View {
                 ChatReceiver.shared.messagesChannel = nil
                 return
             }
-            if case let .chatItemsStatusesUpdated(_, chatItems) = msg,
+            if case let .result(.chatItemsStatusesUpdated(_, chatItems)) = msg,
                chatItems.contains(where: { ci in
                    ci.chatInfo.id == call.contact.id &&
                    ci.chatItem.content.isSndCall &&
@@ -282,6 +284,7 @@ struct ActiveCallView: View {
     }
 }
 
+// Spec: spec/services/calls.md#ActiveCallOverlay
 struct ActiveCallOverlay: View {
     @EnvironmentObject var chatModel: ChatModel
     @ObservedObject var call: Call
@@ -350,6 +353,7 @@ struct ActiveCallOverlay: View {
         }
     }
 
+    // Spec: spec/services/calls.md#audioCallInfoView
     private func audioCallInfoView(_ call: Call) -> some View {
         VStack {
             Text(call.contact.chatViewName)
@@ -399,6 +403,7 @@ struct ActiveCallOverlay: View {
         }
     }
 
+    // Spec: spec/services/calls.md#endCallButton
     private func endCallButton() -> some View {
         let cc = CallController.shared
         return callButton("phone.down.fill", .red, padding: 10) {
@@ -467,7 +472,7 @@ struct ActiveCallOverlay: View {
         .disabled(call.initialCallType == .audio && client.activeCall?.peerHasOldVersion == true)
     }
 
-    @ViewBuilder private func flipCameraButton() -> some View {
+    private func flipCameraButton() -> some View {
         controlButton(call, "arrow.triangle.2.circlepath", padding: 12) {
                 Task {
                     if await WebRTCClient.isAuthorized(for: .video) {
@@ -477,11 +482,11 @@ struct ActiveCallOverlay: View {
         }
     }
 
-    @ViewBuilder private func controlButton(_ call: Call, _ imageName: String, padding: CGFloat, _ perform: @escaping () -> Void) -> some View {
+    private func controlButton(_ call: Call, _ imageName: String, padding: CGFloat, _ perform: @escaping () -> Void) -> some View {
         callButton(imageName, call.peerMediaSources.hasVideo ? Color.black.opacity(0.2) : Color.white.opacity(0.2), padding: padding, perform)
     }
 
-    @ViewBuilder private func audioDevicePickerButton() -> some View {
+    private func audioDevicePickerButton() -> some View {
         AudioDevicePicker()
             .opacity(0.8)
             .scaleEffect(2)

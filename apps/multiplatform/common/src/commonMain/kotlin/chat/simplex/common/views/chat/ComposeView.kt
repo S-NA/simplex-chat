@@ -1,7 +1,9 @@
 @file:UseSerializers(UriSerializer::class, ComposeMessageSerializer::class)
 package chat.simplex.common.views.chat
 
+import SectionItemView
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.*
@@ -16,7 +18,11 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.painter.Painter
 import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontStyle
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextDecoration
 import dev.icerock.moko.resources.compose.painterResource
 import dev.icerock.moko.resources.compose.stringResource
 import androidx.compose.ui.unit.dp
@@ -27,9 +33,15 @@ import chat.simplex.common.model.ChatModel.controller
 import chat.simplex.common.model.ChatModel.filesToDelete
 import chat.simplex.common.platform.*
 import chat.simplex.common.ui.theme.*
+import chat.simplex.common.views.chat.group.hostFromRelayLink
+import chat.simplex.common.views.chat.group.relayConnStatus
 import chat.simplex.common.views.chat.item.*
 import chat.simplex.common.views.helpers.*
+import chat.simplex.common.views.newchat.RelayProgressIndicator
+import chat.simplex.common.views.newchat.RelayStatusIndicator
+import chat.simplex.common.views.newchat.relayDisplayName
 import chat.simplex.res.MR
+import dev.icerock.moko.resources.ImageResource
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.serialization.*
@@ -39,13 +51,16 @@ import kotlinx.serialization.encoding.Encoder
 import java.io.File
 import java.net.URI
 import java.nio.file.Files
+import kotlin.math.min
 
 const val MAX_NUMBER_OF_MENTIONS = 3
 
+// Spec: spec/client/compose.md#ComposePreview
 @Serializable
 sealed class ComposePreview {
   @Serializable object NoPreview: ComposePreview()
   @Serializable class CLinkPreview(val linkPreview: LinkPreview?): ComposePreview()
+  @Serializable class ChatLinkPreview(val chatLink: MsgChatLink, val ownerSig: LinkOwnerSig? = null): ComposePreview()
   @Serializable class MediaPreview(val images: List<String>, val content: List<UploadContent>): ComposePreview()
   @Serializable data class VoicePreview(val voice: String, val durationMs: Int, val finished: Boolean): ComposePreview()
   @Serializable class FilePreview(val fileName: String, val uri: URI): ComposePreview()
@@ -87,6 +102,7 @@ object ComposeMessageSerializer : KSerializer<TextRange> {
     decoder.decodeLong().let { value ->  TextRange(unpackInt1(value), unpackInt2(value)) }
 }
 
+// Spec: spec/client/compose.md#ComposeState
 @Serializable
 data class ComposeState(
   val message: ComposeMessage = ComposeMessage(),
@@ -95,11 +111,17 @@ data class ComposeState(
   val preview: ComposePreview = ComposePreview.NoPreview,
   val contextItem: ComposeContextItem = ComposeContextItem.NoContextItem,
   val inProgress: Boolean = false,
+  val progressByTimeout: Boolean = false,
   val useLinkPreviews: Boolean,
   val mentions: MentionedMembers = emptyMap()
 ) {
   constructor(editingItem: ChatItem, liveMessage: LiveMessage? = null, useLinkPreviews: Boolean): this(
-    ComposeMessage(editingItem.content.text),
+    ComposeMessage(
+      when (val mc = editingItem.content.msgContent) {
+        is MsgContent.MCChat -> stripTextLink(mc.text, mc.chatLink.connLinkStr)
+        else -> editingItem.content.text
+      }
+    ),
     editingItem.formattedText ?: FormattedText.plain(editingItem.content.text),
     liveMessage,
     chatItemPreview(editingItem),
@@ -150,8 +172,9 @@ data class ComposeState(
       val hasContent = when (preview) {
         is ComposePreview.MediaPreview -> true
         is ComposePreview.VoicePreview -> true
+        is ComposePreview.ChatLinkPreview -> true
         is ComposePreview.FilePreview -> true
-        else -> message.text.isNotEmpty() || forwarding || liveMessage != null || submittingValidReport
+        else -> !whitespaceOnly || forwarding || liveMessage != null || submittingValidReport
       }
       hasContent && !inProgress
     }
@@ -161,6 +184,7 @@ data class ComposeState(
   val linkPreviewAllowed: Boolean
     get() =
       when (preview) {
+        is ComposePreview.ChatLinkPreview -> false
         is ComposePreview.MediaPreview -> false
         is ComposePreview.VoicePreview -> false
         is ComposePreview.FilePreview -> false
@@ -187,6 +211,7 @@ data class ComposeState(
     get() = when (preview) {
       ComposePreview.NoPreview -> false
       is ComposePreview.CLinkPreview -> false
+      is ComposePreview.ChatLinkPreview -> false
       is ComposePreview.MediaPreview -> preview.content.isNotEmpty()
       is ComposePreview.VoicePreview -> false
       is ComposePreview.FilePreview -> true
@@ -199,7 +224,10 @@ data class ComposeState(
     }
 
   val empty: Boolean
-    get() = message.text.isEmpty() && preview is ComposePreview.NoPreview && contextItem is ComposeContextItem.NoContextItem
+    get() = whitespaceOnly && preview is ComposePreview.NoPreview && contextItem is ComposeContextItem.NoContextItem
+
+  val whitespaceOnly: Boolean
+    get() = message.text.all { it.isWhitespace() }
 
   companion object {
     fun saver(): Saver<MutableState<ComposeState>, *> = Saver(
@@ -245,10 +273,12 @@ fun chatItemPreview(chatItem: ChatItem): ComposePreview {
     is MsgContent.MCVoice -> ComposePreview.VoicePreview(voice = fileName, mc.duration / 1000, true)
     is MsgContent.MCFile -> ComposePreview.FilePreview(fileName, getAppFileUri(fileName))
     is MsgContent.MCReport -> ComposePreview.NoPreview
+    is MsgContent.MCChat -> ComposePreview.NoPreview
     is MsgContent.MCUnknown, null -> ComposePreview.NoPreview
   }
 }
 
+// Spec: spec/client/compose.md#AttachmentSelection
 @Composable
 expect fun AttachmentSelection(
   composeState: MutableState<ComposeState>,
@@ -331,11 +361,15 @@ suspend fun MutableState<ComposeState>.processPickedMedia(uris: List<URI>, text:
   }
 }
 
+// Spec: spec/client/compose.md#ComposeView
 @Composable
 fun ComposeView(
+  rhId: Long?,
   chatModel: ChatModel,
+  chatsCtx: ChatModel.ChatsContext,
   chat: Chat,
   composeState: MutableState<ComposeState>,
+  showCommandsMenu: MutableState<Boolean>,
   attachmentOption: MutableState<AttachmentOption?>,
   showChooseAttachment: () -> Unit,
   focusRequester: FocusRequester?,
@@ -344,45 +378,77 @@ fun ComposeView(
   fun isSimplexLink(link: String): Boolean =
     link.startsWith("https://simplex.chat", true) || link.startsWith("http://simplex.chat", true)
 
-  fun getSimplexLink(parsedMsg: List<FormattedText>?): Pair<String?, Boolean> {
+  fun getMessageLinks(parsedMsg: List<FormattedText>?): Pair<String?, Boolean> {
     if (parsedMsg == null) return null to false
-    val link = parsedMsg.firstOrNull { ft -> ft.format is Format.Uri && !cancelledLinks.contains(ft.text) && !isSimplexLink(ft.text) }
     val simplexLink = parsedMsg.any { ft -> ft.format is Format.SimplexLink }
-    return link?.text to simplexLink
+    for (ft in parsedMsg) {
+      val link = ft.linkUri
+      if (link != null && !cancelledLinks.contains(link) && !isSimplexLink(link)) {
+        return link to simplexLink
+      }
+    }
+    return null to simplexLink
   }
 
   val linkUrl = rememberSaveable { mutableStateOf<String?>(null) }
   // default value parsed because of draft
-  val hasSimplexLink = rememberSaveable { mutableStateOf(getSimplexLink(parseToMarkdown(composeState.value.message.text)).second) }
+  val hasSimplexLink = rememberSaveable { mutableStateOf(getMessageLinks(parseToMarkdown(composeState.value.message.text)).second) }
   val prevLinkUrl = rememberSaveable { mutableStateOf<String?>(null) }
   val pendingLinkUrl = rememberSaveable { mutableStateOf<String?>(null) }
-  val useLinkPreviews = chatModel.controller.appPrefs.privacyLinkPreviews.get()
+  val useLinkPreviews = true
   val saveLastDraft = chatModel.controller.appPrefs.privacySaveLastDraft.get()
   val smallFont = MaterialTheme.typography.body1.copy(color = MaterialTheme.colors.onBackground)
   val textStyle = remember(MaterialTheme.colors.isLight) { mutableStateOf(smallFont) }
   val recState: MutableState<RecordingState> = remember { mutableStateOf(RecordingState.NotStarted) }
   AttachmentSelection(composeState, attachmentOption, composeState::processPickedFile) { uris, text -> CoroutineScope(Dispatchers.IO).launch { composeState.processPickedMedia(uris, text) } }
 
+  suspend fun fetchAndUpdateLinkPreview(url: String) {
+    composeState.value = composeState.value.copy(preview = ComposePreview.CLinkPreview(null))
+    val lp = getLinkPreview(url)
+    if (lp != null && pendingLinkUrl.value == url) {
+      composeState.value = composeState.value.copy(preview = ComposePreview.CLinkPreview(lp))
+      pendingLinkUrl.value = null
+    } else if (pendingLinkUrl.value == url) {
+      composeState.value = composeState.value.copy(preview = ComposePreview.NoPreview)
+      pendingLinkUrl.value = null
+    }
+  }
+
   fun loadLinkPreview(url: String, wait: Long? = null) {
     if (pendingLinkUrl.value == url) {
-      composeState.value = composeState.value.copy(preview = ComposePreview.CLinkPreview(null))
       withLongRunningApi(slow = 60_000) {
         if (wait != null) delay(wait)
-        val lp = getLinkPreview(url)
-        if (lp != null && pendingLinkUrl.value == url) {
-          composeState.value = composeState.value.copy(preview = ComposePreview.CLinkPreview(lp))
-          pendingLinkUrl.value = null
-        } else if (pendingLinkUrl.value == url) {
-          composeState.value = composeState.value.copy(preview = ComposePreview.NoPreview)
-          pendingLinkUrl.value = null
+        if (pendingLinkUrl.value != url) return@withLongRunningApi
+        if (chatModel.controller.appPrefs.privacyLinkPreviewsShowAlert.get()) {
+          val socksEnabled = chatModel.controller.appPrefs.networkUseSocksProxy.get()
+          showLinkPreviewsConfirmAlert(socksEnabled) { enable ->
+            if (enable != null) {
+              chatModel.controller.appPrefs.privacyLinkPreviewsShowAlert.set(false)
+              chatModel.controller.appPrefs.privacyLinkPreviews.set(enable)
+              if (enable) {
+                withLongRunningApi(slow = 60_000) { fetchAndUpdateLinkPreview(url) }
+              } else if (pendingLinkUrl.value == url) {
+                composeState.value = composeState.value.copy(preview = ComposePreview.NoPreview)
+                pendingLinkUrl.value = null
+              }
+            } else {
+              cancelledLinks.add(url)
+              if (pendingLinkUrl.value == url) {
+                composeState.value = composeState.value.copy(preview = ComposePreview.NoPreview)
+                pendingLinkUrl.value = null
+              }
+            }
+          }
+          return@withLongRunningApi
         }
+        fetchAndUpdateLinkPreview(url)
       }
     }
   }
 
   fun showLinkPreview(parsedMessage: List<FormattedText>?) {
     prevLinkUrl.value = linkUrl.value
-    val linkParsed = getSimplexLink(parsedMessage)
+    val linkParsed = getMessageLinks(parsedMessage)
     linkUrl.value = linkParsed.first
     hasSimplexLink.value = linkParsed.second
     val url = linkUrl.value
@@ -419,7 +485,7 @@ fun ComposeView(
 
   fun clearState(live: Boolean = false) {
     if (live) {
-      composeState.value = composeState.value.copy(inProgress = false)
+      composeState.value = composeState.value.copy(inProgress = false, progressByTimeout = false)
     } else {
       composeState.value = ComposeState(useLinkPreviews = useLinkPreviews)
       resetLinkPreview()
@@ -440,6 +506,7 @@ fun ComposeView(
         is SharedContent.File -> listOf(shared.uri.toString())
         is SharedContent.Text -> emptyList()
         is SharedContent.Forward -> emptyList()
+        is SharedContent.ChatLink -> emptyList()
       }
       // When sharing a file and pasting it in SimpleX itself, the file shouldn't be deleted before sending or before leaving the chat after sharing
       chatModel.filesToDelete.removeAll { file ->
@@ -466,6 +533,8 @@ fun ComposeView(
         rh = chat.remoteHostId,
         type = cInfo.chatType,
         id = cInfo.apiId,
+        scope = cInfo.groupChatScope(),
+        sendAsGroup = cInfo.sendAsGroup,
         live = live,
         ttl = ttl,
         composedMessages = listOf(ComposedMessage(file, quoted, mc, mentions))
@@ -473,7 +542,7 @@ fun ComposeView(
     if (!chatItems.isNullOrEmpty()) {
       chatItems.forEach { aChatItem ->
         withContext(Dispatchers.Main) {
-          chatModel.chatsContext.addChatItem(chat.remoteHostId, cInfo, aChatItem.chatItem)
+          chatsCtx.addChatItem(chat.remoteHostId, aChatItem.chatInfo, aChatItem.chatItem)
         }
       }
       return chatItems.first().chatItem
@@ -482,31 +551,131 @@ fun ComposeView(
     return null
   }
 
+  // TODO [short links] connectCheckLinkPreview
+  fun checkLinkPreview(): MsgContent {
+    val msgText = composeState.value.message.text
+    return when (val composePreview = composeState.value.preview) {
+      is ComposePreview.CLinkPreview -> {
+        val parsedMsg = parseToMarkdown(msgText)
+        val url = getMessageLinks(parsedMsg).first
+        val lp = composePreview.linkPreview
+        if (lp != null && url == lp.uri) {
+          MsgContent.MCLink(msgText, preview = lp)
+        } else {
+          MsgContent.MCText(msgText)
+        }
+      }
+
+      else -> MsgContent.MCText(msgText)
+    }
+  }
+
+  fun sending() {
+    composeState.value = composeState.value.copy(inProgress = true)
+  }
+
+  suspend fun sendMemberContactInvitation() {
+    val mc = checkLinkPreview()
+    sending()
+    val contact = chatModel.controller.apiSendMemberContactInvitation(chat.remoteHostId, chat.chatInfo.apiId, mc)
+    if (contact != null) {
+      withContext(Dispatchers.Main) {
+        chatsCtx.updateContact(chat.remoteHostId, contact)
+        clearState()
+      }
+    } else {
+      composeState.value = composeState.value.copy(inProgress = false)
+    }
+  }
+
+  suspend fun sendConnectPreparedContact() {
+    val mc = checkLinkPreview()
+    sending()
+    val incognito = if (chat.chatInfo.profileChangeProhibited) chat.chatInfo.incognito else chatModel.controller.appPrefs.incognito.get()
+    val contact = chatModel.controller.apiConnectPreparedContact(
+      rh = chat.remoteHostId,
+      contactId = chat.chatInfo.apiId,
+      incognito = incognito,
+      msg = mc
+    )
+    if (contact != null) {
+      withContext(Dispatchers.Main) {
+        chatsCtx.updateContact(chat.remoteHostId, contact)
+        clearState()
+      }
+    } else {
+      composeState.value = composeState.value.copy(inProgress = false)
+    }
+  }
+
+  fun showSendConnectPreparedContactAlert() {
+    val empty = composeState.value.whitespaceOnly
+    AlertManager.shared.showAlertDialogStacked(
+      title = generalGetString(MR.strings.compose_view_send_contact_request_alert_question),
+      text = generalGetString(MR.strings.compose_view_send_contact_request_alert_text),
+      confirmText = (
+          if (empty)
+            generalGetString(MR.strings.compose_view_send_request_without_message)
+          else
+            generalGetString(MR.strings.compose_view_send_request)
+          ),
+      onConfirm = { withApi { sendConnectPreparedContact() } },
+      dismissText = (
+          if (empty)
+            generalGetString(MR.strings.compose_view_add_message)
+          else
+            generalGetString(MR.strings.cancel_verb)
+          )
+    )
+  }
+
+  suspend fun connectPreparedGroup() {
+    val mc = checkLinkPreview()
+    sending()
+    val incognito = if (chat.chatInfo.profileChangeProhibited) chat.chatInfo.incognito else chatModel.controller.appPrefs.incognito.get()
+    val result = chatModel.controller.apiConnectPreparedGroup(
+      rh = chat.remoteHostId,
+      groupId = chat.chatInfo.apiId,
+      incognito = incognito,
+      msg = mc
+    )
+    if (result != null) {
+      val (groupInfo, relayResults) = result
+      withContext(Dispatchers.Main) {
+        chatsCtx.updateGroup(chat.remoteHostId, groupInfo)
+        chatModel.channelRelayHostnames.remove(groupInfo.groupId)
+        chatModel.groupMembers.value = relayResults.map { it.relayMember }
+        chatModel.populateGroupMembersIndexes()
+        clearState()
+      }
+    } else {
+      composeState.value = composeState.value.copy(inProgress = false)
+    }
+  }
+
   suspend fun sendMessageAsync(text: String?, live: Boolean, ttl: Int?): List<ChatItem>? {
-    val cInfo = chat.chatInfo
     val cs = composeState.value
     var sent: List<ChatItem>?
     var lastMessageFailedToSend: ComposeState? = null
     val msgText = text ?: cs.message.text
-
-    fun sending() {
-      composeState.value = composeState.value.copy(inProgress = true)
-    }
 
     suspend fun forwardItem(rhId: Long?, forwardedItem: List<ChatItem>, fromChatInfo: ChatInfo, ttl: Int?): List<ChatItem>? {
       val chatItems = controller.apiForwardChatItems(
         rh = rhId,
         toChatType = chat.chatInfo.chatType,
         toChatId = chat.chatInfo.apiId,
+        toScope = chat.chatInfo.groupChatScope(),
+        sendAsGroup = chat.chatInfo.sendAsGroup,
         fromChatType = fromChatInfo.chatType,
         fromChatId = fromChatInfo.apiId,
+        fromScope = fromChatInfo.groupChatScope(),
         itemIds = forwardedItem.map { it.id },
         ttl = ttl
       )
 
       withContext(Dispatchers.Main) {
         chatItems?.forEach { chatItem ->
-          chatModel.chatsContext.addChatItem(rhId, chat.chatInfo, chatItem)
+          chatsCtx.addChatItem(rhId, chat.chatInfo, chatItem)
         }
       }
 
@@ -518,23 +687,6 @@ fun ComposeView(
       }
 
       return chatItems
-    }
-
-    fun checkLinkPreview(): MsgContent {
-      return when (val composePreview = cs.preview) {
-        is ComposePreview.CLinkPreview -> {
-          val parsedMsg = parseToMarkdown(msgText)
-          val url = getSimplexLink(parsedMsg).first
-          val lp = composePreview.linkPreview
-          if (lp != null && url == lp.uri) {
-            MsgContent.MCLink(msgText, preview = lp)
-          } else {
-            MsgContent.MCText(msgText)
-          }
-        }
-
-        else -> MsgContent.MCText(msgText)
-      }
     }
 
     fun constructFailedMessage(cs: ComposeState): ComposeState {
@@ -559,31 +711,31 @@ fun ComposeView(
         is MsgContent.MCVoice -> MsgContent.MCVoice(msgText, duration = msgContent.duration)
         is MsgContent.MCFile -> MsgContent.MCFile(msgText)
         is MsgContent.MCReport -> MsgContent.MCReport(msgText, reason = msgContent.reason)
+        is MsgContent.MCChat -> {
+          val linkStr = msgContent.chatLink.connLinkStr
+          val text = if (msgText.isEmpty()) linkStr else "$msgText\n$linkStr"
+          MsgContent.MCChat(text, chatLink = msgContent.chatLink, ownerSig = msgContent.ownerSig)
+        }
         is MsgContent.MCUnknown -> MsgContent.MCUnknown(type = msgContent.type, text = msgText, json = msgContent.json)
       }
     }
 
-    suspend fun sendReport(reportReason: ReportReason, chatItemId: Long): List<ChatItem>? {
-      val cItems = chatModel.controller.apiReportMessage(chat.remoteHostId, chat.chatInfo.apiId, chatItemId, reportReason, msgText)
-      if (cItems != null) {
-        withContext(Dispatchers.Main) {
-          cItems.forEach { chatItem ->
-            chatModel.chatsContext.addChatItem(chat.remoteHostId, chat.chatInfo, chatItem.chatItem)
-          }
-        }
-      }
-
-      return cItems?.map { it.chatItem }
+    fun showReportsInSupportChatAlert() {
+      AlertManager.shared.showAlertDialog(
+        title = generalGetString(MR.strings.report_sent_alert_title),
+        text = generalGetString(MR.strings.report_sent_alert_msg_view_in_support_chat),
+        confirmText = generalGetString(MR.strings.ok),
+        dismissText = generalGetString(MR.strings.dont_show_again),
+        onDismiss = {
+          chatModel.controller.appPrefs.showReportsInSupportChatAlert.set(false)
+        },
+      )
     }
 
-    suspend fun sendMemberContactInvitation() {
-      val mc = checkLinkPreview()
-      val contact = chatModel.controller.apiSendMemberContactInvitation(chat.remoteHostId, chat.chatInfo.apiId, mc)
-      if (contact != null) {
-        withContext(Dispatchers.Main) {
-          chatModel.chatsContext.updateContact(chat.remoteHostId, contact)
-        }
-      }
+    suspend fun sendReport(reportReason: ReportReason, chatItemId: Long): List<ChatItem>? {
+      val cItems = chatModel.controller.apiReportMessage(chat.remoteHostId, chat.chatInfo.apiId, chatItemId, reportReason, msgText)
+      if (chatModel.controller.appPrefs.showReportsInSupportChatAlert.get()) showReportsInSupportChatAlert()
+      return cItems?.map { it.chatItem }
     }
 
     suspend fun updateMessage(ei: ChatItem, chat: Chat, live: Boolean): ChatItem? {
@@ -594,13 +746,14 @@ fun ComposeView(
           rh = chat.remoteHostId,
           type = cInfo.chatType,
           id = cInfo.apiId,
+          scope = cInfo.groupChatScope(),
           itemId = ei.meta.itemId,
           updatedMessage = UpdatedMessage(updateMsgContent(oldMsgContent), cs.memberMentions),
           live = live
         )
         if (updatedItem != null) {
           withContext(Dispatchers.Main) {
-            chatModel.chatsContext.upsertChatItem(chat.remoteHostId, cInfo, updatedItem.chatItem)
+            chatsCtx.upsertChatItem(chat.remoteHostId, cInfo, updatedItem.chatItem)
           }
         }
         return updatedItem?.chatItem
@@ -617,10 +770,7 @@ fun ComposeView(
       clearCurrentDraft()
     }
 
-    if (chat.nextSendGrpInv) {
-      sendMemberContactInvitation()
-      sent = null
-    } else if (cs.contextItem is ComposeContextItem.ForwardingItems) {
+    if (cs.contextItem is ComposeContextItem.ForwardingItems) {
       sent = forwardItem(chat.remoteHostId, cs.contextItem.chatItems, cs.contextItem.fromChatInfo, ttl = ttl)
       if (sent == null) {
         lastMessageFailedToSend = constructFailedMessage(cs)
@@ -652,6 +802,11 @@ fun ComposeView(
       when (val preview = cs.preview) {
         ComposePreview.NoPreview -> msgs.add(MsgContent.MCText(msgText))
         is ComposePreview.CLinkPreview -> msgs.add(checkLinkPreview())
+        is ComposePreview.ChatLinkPreview -> {
+          val linkStr = preview.chatLink.connLinkStr
+          val text = if (msgText.isEmpty()) linkStr else "$msgText\n$linkStr"
+          msgs.add(MsgContent.MCChat(text, preview.chatLink, preview.ownerSig))
+        }
         is ComposePreview.MediaPreview -> {
           // TODO batch send: batch media previews
           preview.content.forEachIndexed { index, it ->
@@ -773,24 +928,70 @@ fun ComposeView(
     }
   }
 
+  fun sanitizeMessage(parsedMsg: List<FormattedText>): Triple<String, List<FormattedText>, Int?> {
+    var pos = 0
+    var updatedMsg = ""
+    var sanitizedPos: Int? = null
+    val updatedParsedMsg = parsedMsg.map { ft ->
+      var updated = ft
+      when(ft.format) {
+        is Format.Uri -> {
+          val sanitized = parseSanitizeUri(ft.text, safe = true)?.uriInfo?.sanitized
+          if (sanitized != null) {
+            updated = FormattedText(text = sanitized, format = Format.Uri())
+            pos += updated.text.count()
+            sanitizedPos = pos
+          }
+        }
+        is Format.HyperLink -> {
+          val sanitized = parseSanitizeUri(ft.format.linkUri, safe = true)?.uriInfo?.sanitized
+          if (sanitized != null) {
+            val updatedText = if (ft.format.showText == null) sanitized else "[${ft.format.showText}]($sanitized)"
+            updated = FormattedText(text = updatedText, format = Format.HyperLink(showText = ft.format.showText, linkUri = sanitized))
+            pos += updated.text.count()
+            sanitizedPos = pos
+          }
+        }
+        else ->
+          pos += ft.text.count()
+      }
+      updatedMsg += updated.text
+      updated
+    }
+    return Triple(updatedMsg, updatedParsedMsg, sanitizedPos)
+  }
+
   fun onMessageChange(s: ComposeMessage) {
-    val parsedMessage = parseToMarkdown(s.text)
-    composeState.value = composeState.value.copy(message = s, parsedMessage = parsedMessage ?: FormattedText.plain(s.text))
+    var parsedMessage = parseToMarkdown(s.text)
+    if (chatModel.controller.appPrefs.privacySanitizeLinks.get() && parsedMessage != null) {
+      val (updatedMsg, updatedParsedMsg, sanitizedPos) = sanitizeMessage(parsedMessage)
+      if (sanitizedPos == null) {
+        composeState.value = composeState.value.copy(message = s, parsedMessage = parsedMessage)
+      } else {
+        val pos = min(updatedMsg.count(), if (sanitizedPos < s.selection.start) s.selection.start else sanitizedPos)
+        val message = s.copy(text = updatedMsg, selection = TextRange(pos))
+        composeState.value = composeState.value.copy(message = message, parsedMessage = updatedParsedMsg)
+        parsedMessage = updatedParsedMsg
+      }
+    } else {
+      composeState.value = composeState.value.copy(message = s, parsedMessage = parsedMessage ?: FormattedText.plain(s.text))
+    }
     if (isShortEmoji(s.text)) {
       textStyle.value = if (s.text.codePoints().count() < 4) largeEmojiFont else mediumEmojiFont
     } else {
       textStyle.value = smallFont
-      if (composeState.value.linkPreviewAllowed) {
+      if (composeState.value.linkPreviewAllowed && chatModel.controller.appPrefs.privacyLinkPreviews.get()) {
         if (s.text.isNotEmpty()) {
           showLinkPreview(parsedMessage)
         } else {
           resetLinkPreview()
           hasSimplexLink.value = false
+          composeState.value = composeState.value.copy(preview = ComposePreview.NoPreview)
         }
-      } else if (s.text.isNotEmpty() && !chat.groupFeatureEnabled(GroupFeature.SimplexLinks)) {
-        hasSimplexLink.value = getSimplexLink(parsedMessage).second
       } else {
-        hasSimplexLink.value = false
+        resetLinkPreview()
+        hasSimplexLink.value = s.text.isNotEmpty() && !chat.groupFeatureEnabled(GroupFeature.SimplexLinks) && getMessageLinks(parsedMessage).second
+        if (composeState.value.linkPreviewAllowed) composeState.value = composeState.value.copy(preview = ComposePreview.NoPreview)
       }
     }
   }
@@ -891,7 +1092,7 @@ fun ComposeView(
 
   fun editPrevMessage() {
     if (composeState.value.contextItem != ComposeContextItem.NoContextItem || composeState.value.preview != ComposePreview.NoPreview) return
-    val lastEditable = chatModel.chatsContext.chatItems.value.findLast { it.meta.editable }
+    val lastEditable = chatsCtx.chatItems.value.findLast { it.meta.editable }
     if (lastEditable != null) {
       composeState.value = ComposeState(editingItem = lastEditable, useLinkPreviews = useLinkPreviews)
     }
@@ -905,6 +1106,11 @@ fun ComposeView(
         preview.linkPreview,
         ::cancelLinkPreview,
         cancelEnabled = !composeState.value.inProgress
+      )
+      is ComposePreview.ChatLinkPreview -> ComposeChatLinkView(
+        chatLink = preview.chatLink,
+        cancelEnabled = !composeState.value.inProgress,
+        cancelPreview = { composeState.value = composeState.value.copy(preview = ComposePreview.NoPreview) }
       )
       is ComposePreview.MediaPreview -> ComposeImageView(
         preview,
@@ -974,6 +1180,300 @@ fun ComposeView(
     }
   }
 
+  val ownerRelayState = ownerRelayState(chat, chatModel)
+
+  val userCantSendReason = rememberUpdatedState(chat.chatInfo.userCantSendReason(ownerRelayState?.noActiveRelays == true))
+  val sendMsgEnabled = rememberUpdatedState(userCantSendReason.value == null)
+  val nextSendGrpInv = rememberUpdatedState(chat.nextSendGrpInv)
+
+  @Composable
+  fun CommandsButton() {
+    val commandsEnabled = chat.chatInfo.sendMsgEnabled && chat.chatInfo.menuCommands.isNotEmpty()
+    IconButton(
+      onClick = { showCommandsMenu.value = !showCommandsMenu.value },
+      enabled = commandsEnabled
+    ) {
+      Box(
+        modifier = Modifier.size(28.dp).clip(CircleShape),
+        contentAlignment = Alignment.Center
+      ) {
+        Text("//", style = MaterialTheme.typography.h3.copy(fontStyle = FontStyle.Italic, color = if (commandsEnabled) MaterialTheme.colors.primary else MaterialTheme.colors.secondary))
+      }
+    }
+  }
+
+  @Composable
+  fun AttachmentButton() {
+    val isGroupAndProhibitedFiles =
+      chatsCtx.secondaryContextFilter == null
+          && chat.chatInfo is ChatInfo.Group
+          && !chat.chatInfo.groupInfo.fullGroupPreferences.files.on(chat.chatInfo.groupInfo.membership)
+    val attachmentClicked = if (isGroupAndProhibitedFiles) {
+      {
+        AlertManager.shared.showAlertMsg(
+          title = generalGetString(MR.strings.files_and_media_prohibited),
+          text = generalGetString(MR.strings.only_owners_can_enable_files_and_media)
+        )
+      }
+    } else {
+      showChooseAttachment
+    }
+    val attachmentEnabled =
+      !composeState.value.attachmentDisabled
+          && sendMsgEnabled.value
+          && !isGroupAndProhibitedFiles
+          && !nextSendGrpInv.value
+    IconButton(
+      attachmentClicked,
+      enabled = attachmentEnabled
+    ) {
+      Icon(
+        painterResource(MR.images.ic_attach_file_filled_500),
+        contentDescription = stringResource(MR.strings.attach),
+        tint = if (attachmentEnabled) MaterialTheme.colors.primary else MaterialTheme.colors.secondary,
+        modifier = Modifier
+          .size(28.dp)
+          .clip(CircleShape)
+      )
+    }
+  }
+
+  @Composable
+  fun AttachmentAndCommandsButtons() {
+    val cInfo = chat.chatInfo
+    Row(
+      Modifier.padding(start = 3.dp, end = 1.dp, bottom = if (appPlatform.isAndroid) 2.sp.toDp() else 5.sp.toDp() * fontSizeSqrtMultiplier),
+      horizontalArrangement = Arrangement.spacedBy((-8).dp)
+    ) {
+      val msg = composeState.value.message.text.trim()
+      val showAttachment = cInfo !is ChatInfo.Direct || cInfo.contact.profile.peerType != ChatPeerType.Bot || cInfo.featureEnabled(ChatFeature.Files)
+      if (cInfo.useCommands && (!showAttachment || msg.isEmpty() || msg.startsWith("/"))) {
+        CommandsButton()
+      }
+      if (showAttachment) {
+        AttachmentButton()
+      }
+    }
+  }
+
+  val allowedVoiceByPrefs = remember(chat.chatInfo) { chat.chatInfo.featureEnabled(ChatFeature.Voice) }
+  LaunchedEffect(allowedVoiceByPrefs) {
+    if (!allowedVoiceByPrefs && composeState.value.preview is ComposePreview.VoicePreview) {
+      // Voice was disabled right when this user records it, just cancel it
+      cancelVoice()
+    }
+  }
+  val needToAllowVoiceToContact = remember(chat.chatInfo) {
+    chat.chatInfo is ChatInfo.Direct && with(chat.chatInfo.contact.mergedPreferences.voice) {
+      ((userPreference as? ContactUserPref.User)?.preference?.allow == FeatureAllowed.NO || (userPreference as? ContactUserPref.Contact)?.preference?.allow == FeatureAllowed.NO) &&
+          contactPreference.allow == FeatureAllowed.YES
+    }
+  }
+  LaunchedEffect(Unit) {
+    snapshotFlow { recState.value }
+      .distinctUntilChanged()
+      .collect {
+        when (it) {
+          is RecordingState.Started -> onAudioAdded(it.filePath, it.progressMs, false)
+          is RecordingState.Finished -> if (it.durationMs > 300) {
+            onAudioAdded(it.filePath, it.durationMs, true)
+          } else {
+            cancelVoice()
+          }
+          is RecordingState.NotStarted -> {}
+        }
+      }
+  }
+
+  LaunchedEffect(rememberUpdatedState(chat.chatInfo.sendMsgEnabled).value) {
+    if (!chat.chatInfo.sendMsgEnabled) {
+      clearCurrentDraft()
+      clearState()
+    }
+  }
+
+  KeyChangeEffect(chatModel.chatId.value) { prevChatId ->
+    val cs = composeState.value
+    if (cs.liveMessage != null && (cs.message.text.isNotEmpty() || cs.liveMessage.sent)) {
+      sendMessage(null)
+      resetLinkPreview()
+      clearPrevDraft(prevChatId)
+      deleteUnusedFiles()
+    } else if (cs.inProgress) {
+      clearPrevDraft(prevChatId)
+      composeState.value = cs.copy(inProgress = false, progressByTimeout = false)
+    } else if (!cs.empty) {
+      if (cs.preview is ComposePreview.VoicePreview && !cs.preview.finished) {
+        recState.value = RecordingState.NotStarted
+        RecorderInterface.stopRecording?.invoke()
+        composeState.value = cs.copy(preview = cs.preview.copy(finished = true))
+      }
+      if (saveLastDraft) {
+        chatModel.draft.value = composeState.value
+        chatModel.draftChatId.value = prevChatId
+      }
+      composeState.value = ComposeState(useLinkPreviews = useLinkPreviews)
+    } else if (chatModel.draftChatId.value == chatModel.chatId.value && chatModel.draft.value != null) {
+      composeState.value = chatModel.draft.value ?: ComposeState(useLinkPreviews = useLinkPreviews)
+    } else {
+      clearPrevDraft(prevChatId)
+      deleteUnusedFiles()
+    }
+    chatModel.removeLiveDummy()
+    CIFile.cachedRemoteFileRequests.clear()
+  }
+  if (appPlatform.isDesktop) {
+    // Don't enable this on Android, it breaks it, This method only works on desktop. For Android there is a `KeyChangeEffect(chatModel.chatId.value)`
+    DisposableEffect(Unit) {
+      onDispose {
+        if (chatModel.sharedContent.value is SharedContent.Forward && saveLastDraft && !composeState.value.empty) {
+          chatModel.draft.value = composeState.value
+          chatModel.draftChatId.value = chat.id
+        }
+      }
+    }
+  }
+
+  @Composable
+  fun SendMsgView_(
+    disableSendButton: Boolean,
+    placeholder: String? = null,
+    sendToConnect: (() -> Unit)? = null
+  ) {
+    val timedMessageAllowed = remember(chat.chatInfo) { chat.chatInfo.featureEnabled(ChatFeature.TimedMessages) }
+    val sendButtonColor =
+      if (chat.chatInfo.incognito)
+        if (isInDarkTheme()) Indigo else Indigo.copy(alpha = 0.7F)
+      else MaterialTheme.colors.primary
+    SendMsgView(
+      composeState,
+      showVoiceRecordIcon = true,
+      recState,
+      chat.chatInfo is ChatInfo.Direct,
+      liveMessageAlertShown = chatModel.controller.appPrefs.liveMessageAlertShown,
+      sendMsgEnabled = sendMsgEnabled.value,
+      userCantSendReason = userCantSendReason.value,
+      sendButtonEnabled = sendMsgEnabled.value && !disableSendButton,
+      sendToConnect = sendToConnect,
+      hideSendButton = chat.chatInfo.nextConnect && !nextSendGrpInv.value && composeState.value.whitespaceOnly,
+      nextConnect = chat.chatInfo.nextConnect,
+      needToAllowVoiceToContact = needToAllowVoiceToContact,
+      allowedVoiceByPrefs = allowedVoiceByPrefs,
+      allowVoiceToContact = ::allowVoiceToContact,
+      sendButtonColor = sendButtonColor,
+      timedMessageAllowed = timedMessageAllowed,
+      customDisappearingMessageTimePref = chatModel.controller.appPrefs.customDisappearingMessageTime,
+      placeholder = if (userCantSendReason.value != null) "" else placeholder ?: composeState.value.placeholder,
+      sendMessage = { ttl ->
+        sendMessage(ttl)
+        resetLinkPreview()
+      },
+      sendLiveMessage = if (chat.chatInfo.chatType != ChatType.Local) ::sendLiveMessage else null,
+      updateLiveMessage = ::updateLiveMessage,
+      cancelLiveMessage = {
+        composeState.value = composeState.value.copy(liveMessage = null)
+        chatModel.removeLiveDummy()
+      },
+      editPrevMessage = ::editPrevMessage,
+      onFilesPasted = { composeState.onFilesAttached(it) },
+      onMessageChange = ::onMessageChange,
+      textStyle = textStyle,
+      focusRequester = focusRequester,
+    )
+  }
+
+  @Composable
+  fun SendContactRequestView(
+    disableSendButton: Boolean,
+    icon: ImageResource,
+    sendRequest: () -> Unit
+  ) {
+    Row(
+      Modifier.padding(horizontal = DEFAULT_PADDING_HALF),
+      verticalAlignment = Alignment.CenterVertically
+    ) {
+      Box(
+        Modifier.weight(1f)
+      ) {
+        SendMsgView_(
+          disableSendButton = disableSendButton,
+          placeholder = generalGetString(MR.strings.compose_view_add_message),
+          sendToConnect = sendRequest
+        )
+      }
+      if (composeState.value.whitespaceOnly) {
+        SimpleButtonIconEnded(
+          text = stringResource(MR.strings.compose_view_connect),
+          icon = painterResource(icon),
+          style = MaterialTheme.typography.body2,
+          color = if (composeState.value.inProgress) MaterialTheme.colors.secondary else MaterialTheme.colors.primary,
+          disabled = composeState.value.inProgress,
+          click = { withApi { sendRequest() } }
+        )
+      }
+    }
+  }
+
+  @Composable
+  fun ConnectButtonView(
+    text: String,
+    icon: ImageResource,
+    connect: () -> Unit
+  ) {
+    var modifier = Modifier.height(57.dp).fillMaxWidth()
+    modifier = if (composeState.value.inProgress) modifier else modifier.clickable(onClick = { connect() })
+    Box(
+      modifier,
+      contentAlignment = Alignment.Center
+    ) {
+      Row(
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.CenterVertically
+      ) {
+        Icon(
+          painterResource(icon),
+          contentDescription = null,
+          tint = if (composeState.value.inProgress) MaterialTheme.colors.secondary else MaterialTheme.colors.primary
+        )
+        Text(
+          text,
+          style = MaterialTheme.typography.body2,
+          color = if (composeState.value.inProgress) MaterialTheme.colors.secondary else MaterialTheme.colors.primary
+        )
+      }
+      if (composeState.value.progressByTimeout && chat.chatInfo.groupInfo_?.useRelays != true) {
+        Box(
+          Modifier.fillMaxWidth().padding(end = DEFAULT_PADDING_HALF),
+          contentAlignment = Alignment.CenterEnd
+        ) {
+          ComposeProgressIndicator()
+        }
+      }
+    }
+  }
+
+  @Composable
+  fun ContextSendMessageToConnect(s: String) {
+    Row(
+      Modifier
+        .height(60.dp)
+        .fillMaxWidth()
+        .padding(horizontal = DEFAULT_PADDING),
+      verticalAlignment = Alignment.CenterVertically
+    ) {
+      Icon(
+        painterResource(MR.images.ic_chat),
+        contentDescription = null,
+        modifier = Modifier
+          .padding(end = 8.dp)
+          .height(20.dp)
+          .width(20.dp),
+        tint = MaterialTheme.colors.secondary
+      )
+      Text(s)
+    }
+  }
+
   // In case a user sent something, state is in progress, the user rotates a screen to different orientation.
   // Without clearing the state the user will be unable to send anything until re-enters ChatView
   LaunchedEffect(Unit) {
@@ -994,27 +1494,101 @@ fun ComposeView(
         contextItem = ComposeContextItem.ForwardingItems(shared.chatItems, shared.fromChatInfo),
         preview = if (composeState.value.preview is ComposePreview.CLinkPreview) composeState.value.preview else ComposePreview.NoPreview
       )
+      is SharedContent.ChatLink -> {
+        val cInfo = chat.chatInfo
+        val sendAsGroup = cInfo.sendAsGroup
+        withBGApi {
+          val mc = chatModel.controller.apiShareChatMsgContent(
+            chat.remoteHostId, ChatType.Group, shared.groupInfo.groupId,
+            cInfo.chatType, cInfo.apiId,
+            cInfo.groupChatScope(), sendAsGroup
+          )
+          if (mc is MsgContent.MCChat) {
+            composeState.value = composeState.value.copy(
+              preview = ComposePreview.ChatLinkPreview(mc.chatLink, mc.ownerSig)
+            )
+          }
+        }
+      }
       null -> {}
     }
     chatModel.sharedContent.value = null
   }
 
-  val userCanSend = rememberUpdatedState(chat.chatInfo.userCanSend)
-  val sendMsgEnabled = rememberUpdatedState(chat.chatInfo.sendMsgEnabled)
-  val userIsObserver = rememberUpdatedState(chat.userIsObserver)
-  val nextSendGrpInv = rememberUpdatedState(chat.nextSendGrpInv)
+  LaunchedEffect(composeState.value.inProgress) {
+    val newProgressByTimeout = if (composeState.value.inProgress) {
+      delay(1000)
+      composeState.value.inProgress
+    } else {
+      false
+    }
+    composeState.value = composeState.value.copy(progressByTimeout = newProgressByTimeout)
+  }
+
+  val relayListExpanded = remember { mutableStateOf(false) }
 
   Column {
-    if (nextSendGrpInv.value) {
-      ComposeContextInvitingContactMemberView()
+    val currentUser = chatModel.currentUser.value
+    if (chat.chatInfo.nextConnectPrepared && !composeState.value.inProgress && currentUser != null) {
+      ComposeContextProfilePickerView(
+        rhId = rhId,
+        chat = chat,
+        currentUser = currentUser
+      )
     }
+
+    val gInfo = (chat.chatInfo as? ChatInfo.Group)?.groupInfo
+    if (gInfo != null && gInfo.useRelays
+      && gInfo.membership.memberStatus !in listOf(GroupMemberStatus.MemRejected, GroupMemberStatus.MemLeft, GroupMemberStatus.MemRemoved, GroupMemberStatus.MemGroupDeleted)
+    ) {
+      if (gInfo.membership.memberRole == GroupMemberRole.Owner) {
+        ownerRelayState?.let { s ->
+          if (s.relays.isEmpty() || s.activeCount < s.relays.size) {
+            OwnerChannelRelayBar(chatModel, s.relays, s.activeCount, s.failedCount, s.removedCount, relayListExpanded)
+          }
+        }
+      } else {
+        val hostnames = (chatModel.channelRelayHostnames[gInfo.groupId] ?: emptyList()).sorted()
+        val relayMembers = chatModel.groupMembers.value
+          .filter { it.memberRole == GroupMemberRole.Relay && it.memberStatus !in listOf(GroupMemberStatus.MemRemoved, GroupMemberStatus.MemGroupDeleted) }
+          .sortedBy { hostFromRelayLink(it.relayLink ?: "") }
+        val showProgress = !gInfo.nextConnectPrepared || composeState.value.inProgress
+        val removedCount = relayMembers.count { relayMemberRemoved(it.memberStatus) }
+        val connectedCount = relayMembers.count { !relayMemberRemoved(it.memberStatus) && it.activeConn?.connStatus == ConnStatus.Ready && it.activeConn?.connFailedErr == null }
+        val failedCount = relayMembers.count { !relayMemberRemoved(it.memberStatus) && it.activeConn?.connFailedErr != null }
+        val resolvedCount = connectedCount + removedCount + failedCount
+        val total = if (relayMembers.isNotEmpty()) relayMembers.size else hostnames.size
+        if (total == 0 || removedCount + failedCount > 0 || resolvedCount < total) {
+          SubscriberChannelRelayBar(hostnames, relayMembers, connectedCount, removedCount, failedCount, total, showProgress, relayListExpanded)
+        }
+      }
+    }
+
+    if (
+      chat.chatInfo is ChatInfo.Group
+      && chatsCtx.secondaryContextFilter is SecondaryContextFilter.GroupChatScopeContext
+      && chatsCtx.secondaryContextFilter.groupScopeInfo is GroupChatScopeInfo.MemberSupport
+      && chatsCtx.secondaryContextFilter.groupScopeInfo.groupMember_ != null
+      && chatsCtx.secondaryContextFilter.groupScopeInfo.groupMember_.memberPending
+      && composeState.value.contextItem == ComposeContextItem.NoContextItem
+      && composeState.value.preview == ComposePreview.NoPreview
+    ) {
+      ComposeContextPendingMemberActionsView(
+        rhId = rhId,
+        groupInfo = chat.chatInfo.groupInfo,
+        member = chatsCtx.secondaryContextFilter.groupScopeInfo.groupMember_
+      )
+    }
+
     val ctx = composeState.value.contextItem
     if (ctx is ComposeContextItem.ReportedItem) {
       ReportReasonView(ctx.reason)
     }
-    val simplexLinkProhibited = hasSimplexLink.value && !chat.groupFeatureEnabled(GroupFeature.SimplexLinks)
-    val fileProhibited = composeState.value.attachmentPreview && !chat.groupFeatureEnabled(GroupFeature.Files)
+
+    val simplexLinkProhibited = chatsCtx.secondaryContextFilter == null && hasSimplexLink.value && !chat.groupFeatureEnabled(GroupFeature.SimplexLinks)
+    val fileProhibited = chatsCtx.secondaryContextFilter == null && composeState.value.attachmentPreview && !chat.groupFeatureEnabled(GroupFeature.Files)
     val voiceProhibited = composeState.value.preview is ComposePreview.VoicePreview && !chat.chatInfo.featureEnabled(ChatFeature.Voice)
+    val disableSendButton = simplexLinkProhibited || fileProhibited || voiceProhibited
     if (composeState.value.preview !is ComposePreview.VoicePreview || composeState.value.editing) {
       if (simplexLinkProhibited) {
         MsgNotAllowedView(generalGetString(MR.strings.simplex_links_not_allowed), icon = painterResource(MR.images.ic_link))
@@ -1039,154 +1613,418 @@ fun ComposeView(
         }
       }
     }
+
     Surface(color = MaterialTheme.colors.background, contentColor = MaterialTheme.colors.onBackground) {
       Divider()
-      Row(Modifier.padding(end = 8.dp), verticalAlignment = Alignment.Bottom) {
-        val isGroupAndProhibitedFiles = chat.chatInfo is ChatInfo.Group && !chat.chatInfo.groupInfo.fullGroupPreferences.files.on(chat.chatInfo.groupInfo.membership)
-        val attachmentClicked = if (isGroupAndProhibitedFiles) {
-          {
-            AlertManager.shared.showAlertMsg(
-              title = generalGetString(MR.strings.files_and_media_prohibited),
-              text = generalGetString(MR.strings.only_owners_can_enable_files_and_media)
-            )
-          }
+      if (chat.chatInfo is ChatInfo.Group && chat.chatInfo.groupInfo.nextConnectPrepared) {
+        if (chat.chatInfo.groupInfo.businessChat == null) {
+          val isChannel = chat.chatInfo.groupInfo.useRelays
+          ConnectButtonView(
+            text = stringResource(if (isChannel) MR.strings.compose_view_join_channel else MR.strings.compose_view_join_group),
+            icon = if (isChannel) MR.images.ic_bigtop_updates else MR.images.ic_group_filled,
+            connect = { withApi { connectPreparedGroup() } }
+          )
         } else {
-          showChooseAttachment
-        }
-        val attachmentEnabled =
-          !composeState.value.attachmentDisabled
-              && sendMsgEnabled.value
-              && userCanSend.value
-              && !isGroupAndProhibitedFiles
-              && !nextSendGrpInv.value
-        IconButton(
-          attachmentClicked,
-          Modifier.padding(start = 3.dp, end = 1.dp, bottom = if (appPlatform.isAndroid) 2.sp.toDp() else 5.sp.toDp() * fontSizeSqrtMultiplier),
-          enabled = attachmentEnabled
-        ) {
-          Icon(
-            painterResource(MR.images.ic_attach_file_filled_500),
-            contentDescription = stringResource(MR.strings.attach),
-            tint = if (attachmentEnabled) MaterialTheme.colors.primary else MaterialTheme.colors.secondary,
-            modifier = Modifier
-              .size(28.dp)
-              .clip(CircleShape)
+          SendContactRequestView(
+            disableSendButton = disableSendButton,
+            icon = MR.images.ic_work_filled,
+            sendRequest = { withApi { connectPreparedGroup() } }
           )
         }
-        val allowedVoiceByPrefs = remember(chat.chatInfo) { chat.chatInfo.featureEnabled(ChatFeature.Voice) }
-        LaunchedEffect(allowedVoiceByPrefs) {
-          if (!allowedVoiceByPrefs && composeState.value.preview is ComposePreview.VoicePreview) {
-            // Voice was disabled right when this user records it, just cancel it
-            cancelVoice()
+      } else if (nextSendGrpInv.value) {
+        Column {
+          ContextSendMessageToConnect(generalGetString(MR.strings.compose_send_direct_message_to_connect))
+          Divider()
+          Row(Modifier.padding(end = 8.dp), verticalAlignment = Alignment.Bottom) {
+            AttachmentAndCommandsButtons()
+            SendMsgView_(
+              disableSendButton = disableSendButton,
+              sendToConnect = { withApi { sendMemberContactInvitation() } }
+            )
           }
         }
-        val needToAllowVoiceToContact = remember(chat.chatInfo) {
-          chat.chatInfo is ChatInfo.Direct && with(chat.chatInfo.contact.mergedPreferences.voice) {
-            ((userPreference as? ContactUserPref.User)?.preference?.allow == FeatureAllowed.NO || (userPreference as? ContactUserPref.Contact)?.preference?.allow == FeatureAllowed.NO) &&
-                contactPreference.allow == FeatureAllowed.YES
-          }
-        }
-        LaunchedEffect(Unit) {
-          snapshotFlow { recState.value }
-            .distinctUntilChanged()
-            .collect {
-              when (it) {
-                is RecordingState.Started -> onAudioAdded(it.filePath, it.progressMs, false)
-                is RecordingState.Finished -> if (it.durationMs > 300) {
-                  onAudioAdded(it.filePath, it.durationMs, true)
-                } else {
-                  cancelVoice()
-                }
-                is RecordingState.NotStarted -> {}
-              }
+      } else if (
+        chat.chatInfo is ChatInfo.Direct
+        && chat.chatInfo.contact.nextConnectPrepared
+        && chat.chatInfo.contact.preparedContact != null
+      ) {
+        when (chat.chatInfo.contact.preparedContact.uiConnLinkType) {
+          ConnectionMode.Inv ->
+            ConnectButtonView(
+              text = stringResource(MR.strings.compose_view_connect),
+              icon = MR.images.ic_person_add_filled,
+              connect = { withApi { sendConnectPreparedContact() } }
+            )
+          ConnectionMode.Con ->
+            if (chat.chatInfo.contact.isBot) {
+              ConnectButtonView(
+                text = stringResource(MR.strings.compose_view_connect),
+                icon = MR.images.ic_bolt_filled,
+                connect = { withApi { sendConnectPreparedContact() } }
+              )
+            } else {
+              SendContactRequestView(
+                disableSendButton = disableSendButton,
+                icon = MR.images.ic_person_add_filled,
+                sendRequest = { showSendConnectPreparedContactAlert() }
+              )
             }
         }
-
-        LaunchedEffect(rememberUpdatedState(chat.chatInfo.userCanSend).value) {
-          if (!chat.chatInfo.userCanSend) {
-            clearCurrentDraft()
-            clearState()
-          }
-        }
-
-        KeyChangeEffect(chatModel.chatId.value) { prevChatId ->
-          val cs = composeState.value
-          if (cs.liveMessage != null && (cs.message.text.isNotEmpty() || cs.liveMessage.sent)) {
-            sendMessage(null)
-            resetLinkPreview()
-            clearPrevDraft(prevChatId)
-            deleteUnusedFiles()
-          } else if (cs.inProgress) {
-            clearPrevDraft(prevChatId)
-          } else if (!cs.empty) {
-            if (cs.preview is ComposePreview.VoicePreview && !cs.preview.finished) {
-              composeState.value = cs.copy(preview = cs.preview.copy(finished = true))
-            }
-            if (saveLastDraft) {
-              chatModel.draft.value = composeState.value
-              chatModel.draftChatId.value = prevChatId
-            }
-            composeState.value = ComposeState(useLinkPreviews = useLinkPreviews)
-          } else if (chatModel.draftChatId.value == chatModel.chatId.value && chatModel.draft.value != null) {
-            composeState.value = chatModel.draft.value ?: ComposeState(useLinkPreviews = useLinkPreviews)
-          } else {
-            clearPrevDraft(prevChatId)
-            deleteUnusedFiles()
-          }
-          chatModel.removeLiveDummy()
-          CIFile.cachedRemoteFileRequests.clear()
-        }
-        if (appPlatform.isDesktop) {
-          // Don't enable this on Android, it breaks it, This method only works on desktop. For Android there is a `KeyChangeEffect(chatModel.chatId.value)`
-          DisposableEffect(Unit) {
-            onDispose {
-              if (chatModel.sharedContent.value is SharedContent.Forward && saveLastDraft && !composeState.value.empty) {
-                chatModel.draft.value = composeState.value
-                chatModel.draftChatId.value = chat.id
-              }
-            }
-          }
-        }
-        val timedMessageAllowed = remember(chat.chatInfo) { chat.chatInfo.featureEnabled(ChatFeature.TimedMessages) }
-        val sendButtonColor =
-          if (chat.chatInfo.incognito)
-            if (isInDarkTheme()) Indigo else Indigo.copy(alpha = 0.7F)
-          else MaterialTheme.colors.primary
-        SendMsgView(
-          composeState,
-          showVoiceRecordIcon = true,
-          recState,
-          chat.chatInfo is ChatInfo.Direct,
-          liveMessageAlertShown = chatModel.controller.appPrefs.liveMessageAlertShown,
-          sendMsgEnabled = sendMsgEnabled.value,
-          sendButtonEnabled = sendMsgEnabled.value && !(simplexLinkProhibited || fileProhibited || voiceProhibited),
-          nextSendGrpInv = nextSendGrpInv.value,
-          needToAllowVoiceToContact,
-          allowedVoiceByPrefs,
-          allowVoiceToContact = ::allowVoiceToContact,
-          userIsObserver = userIsObserver.value,
-          userCanSend = userCanSend.value,
-          sendButtonColor = sendButtonColor,
-          timedMessageAllowed = timedMessageAllowed,
-          customDisappearingMessageTimePref = chatModel.controller.appPrefs.customDisappearingMessageTime,
-          placeholder = composeState.value.placeholder,
-          sendMessage = { ttl ->
-            sendMessage(ttl)
-            resetLinkPreview()
-          },
-          sendLiveMessage = if (chat.chatInfo.chatType != ChatType.Local) ::sendLiveMessage else null,
-          updateLiveMessage = ::updateLiveMessage,
-          cancelLiveMessage = {
-            composeState.value = composeState.value.copy(liveMessage = null)
-            chatModel.removeLiveDummy()
-          },
-          editPrevMessage = ::editPrevMessage,
-          onFilesPasted = { composeState.onFilesAttached(it) },
-          onMessageChange = ::onMessageChange,
-          textStyle = textStyle,
-          focusRequester = focusRequester,
+      } else if (
+        chat.chatInfo is ChatInfo.Direct
+        && chat.chatInfo.contact.nextAcceptContactRequest
+        && chat.chatInfo.contact.contactRequestId != null
+      ) {
+        ComposeContextContactRequestActionsView(
+          rhId = rhId,
+          contactRequestId = chat.chatInfo.contact.contactRequestId
         )
+      } else if (
+        chat.chatInfo is ChatInfo.Direct
+        && chat.chatInfo.contact.nextAcceptContactRequest
+        && chat.chatInfo.contact.groupDirectInv != null
+      ) {
+        ComposeContextMemberContactActionsView(
+          rhId = rhId,
+          contact = chat.chatInfo.contact,
+          groupDirectInv = chat.chatInfo.contact.groupDirectInv
+        )
+      } else {
+        Row(Modifier.padding(end = 8.dp), verticalAlignment = Alignment.Bottom) {
+          AttachmentAndCommandsButtons()
+          val broadcastPlaceholder = (chat.chatInfo as? ChatInfo.Group)?.groupInfo?.let { gi ->
+            if (gi.useRelays && gi.membership.memberRole >= GroupMemberRole.Owner && chat.chatInfo.groupChatScope() == null) generalGetString(MR.strings.compose_view_broadcast)
+            else null
+          }
+          SendMsgView_(disableSendButton = disableSendButton, placeholder = broadcastPlaceholder)
+        }
       }
     }
   }
 }
+
+private fun showLinkPreviewsConfirmAlert(socksEnabled: Boolean, onChoice: (Boolean?) -> Unit) {
+  AlertManager.shared.showAlertDialogButtonsColumn(
+    title = generalGetString(MR.strings.link_previews_alert_title),
+    text = AnnotatedString(
+      if (socksEnabled)
+        generalGetString(MR.strings.link_previews_alert_desc) + "\n\n" + generalGetString(MR.strings.link_previews_alert_desc_socks)
+      else
+        generalGetString(MR.strings.link_previews_alert_desc)
+    ),
+    onDismissRequest = { onChoice(null) },
+    buttons = {
+      Column {
+        SectionItemView({
+          AlertManager.shared.hideAlert()
+          onChoice(false)
+        }) {
+          Text(stringResource(MR.strings.link_previews_alert_disable), Modifier.fillMaxWidth(), textAlign = TextAlign.Center, color = MaterialTheme.colors.primary)
+        }
+        SectionItemView({
+          AlertManager.shared.hideAlert()
+          onChoice(true)
+        }) {
+          Text(stringResource(MR.strings.link_previews_alert_enable), Modifier.fillMaxWidth(), textAlign = TextAlign.Center, color = if (socksEnabled) MaterialTheme.colors.primary else Color.Red)
+        }
+//        SectionItemView({
+//          AlertManager.shared.hideAlert()
+//          onChoice(null)
+//        }) {
+//          Text(stringResource(MR.strings.cancel_verb), Modifier.fillMaxWidth(), textAlign = TextAlign.Center, color = MaterialTheme.colors.onBackground)
+//        }
+      }
+    }
+  )
+}
+
+@Composable
+private fun OwnerChannelRelayBar(
+  chatModel: ChatModel,
+  relays: List<GroupRelay>,
+  activeCount: Int,
+  failedCount: Int,
+  removedCount: Int,
+  relayListExpanded: MutableState<Boolean>
+) {
+  val total = relays.size
+  val allBroken = activeCount == 0 && (failedCount + removedCount) == total
+  val members = chatModel.groupMembers.value.associateBy { it.groupMemberId }
+  val sorted = relays.map { relay -> relay to members[relay.groupMemberId] }.sortedBy { relayDisplayName(it.first) }
+  Column(Modifier.background(MaterialTheme.colors.surface)) {
+    RelayBarHeader(relayListExpanded) {
+      if (!allBroken && activeCount + failedCount + removedCount < total) {
+        RelayProgressIndicator(active = activeCount, total = total)
+      }
+      if (total == 0) {
+        Text(generalGetString(MR.strings.relay_bar_no_relays), color = MaterialTheme.colors.secondary)
+        Icon(
+          painterResource(MR.images.ic_warning),
+          contentDescription = null,
+          tint = WarningOrange,
+          modifier = Modifier.size(18.dp)
+        )
+      } else if (allBroken) {
+        val statusText = if (removedCount == total) {
+          generalGetString(MR.strings.relay_bar_all_relays_removed)
+        } else if (failedCount == total) {
+          generalGetString(MR.strings.relay_bar_all_relays_failed)
+        } else {
+          generalGetString(MR.strings.relay_bar_no_active_relays)
+        }
+        Text(statusText, color = MaterialTheme.colors.secondary)
+        Icon(
+          painterResource(MR.images.ic_warning),
+          contentDescription = null,
+          tint = WarningOrange,
+          modifier = Modifier.size(18.dp)
+        )
+      } else if (activeCount + failedCount + removedCount >= total) {
+        val statusText = if (failedCount > 0 && removedCount > 0) {
+          String.format(generalGetString(MR.strings.relay_bar_relays_not_active), failedCount + removedCount)
+        } else if (failedCount > 0) {
+          String.format(generalGetString(MR.strings.relay_bar_relays_failed), failedCount)
+        } else {
+          String.format(generalGetString(MR.strings.relay_bar_relays_removed), removedCount)
+        }
+        Text(statusText, color = MaterialTheme.colors.secondary)
+      } else {
+        val statusText = if (failedCount > 0 && removedCount > 0) {
+          String.format(generalGetString(MR.strings.relay_bar_active_with_errors), activeCount, total, failedCount + removedCount)
+        } else if (failedCount > 0) {
+          String.format(generalGetString(MR.strings.relay_bar_active_with_failures), activeCount, total, failedCount)
+        } else if (removedCount > 0) {
+          String.format(generalGetString(MR.strings.relay_bar_active_with_removed), activeCount, total, removedCount)
+        } else {
+          String.format(generalGetString(MR.strings.relay_bar_active), activeCount, total)
+        }
+        Text(statusText, color = MaterialTheme.colors.secondary)
+      }
+    }
+    if (relayListExpanded.value) {
+      if (allBroken) {
+        Text(
+          generalGetString(MR.strings.relay_bar_owner_no_delivery),
+          modifier = Modifier.fillMaxWidth().padding(start = 12.dp, end = DEFAULT_PADDING, bottom = 4.dp),
+          color = MaterialTheme.colors.secondary,
+          fontSize = 12.sp
+        )
+      }
+      sorted.forEach { (relay, m) ->
+        val failedErr = m?.activeConn?.connFailedErr
+        RelayBarDetailRow(
+          onClick = if (failedErr != null) {
+            {
+              AlertManager.shared.showAlertMsg(
+                title = generalGetString(MR.strings.relay_connection_failed),
+                text = failedErr
+              )
+            }
+          } else null
+        ) {
+          Text(
+            relayDisplayName(relay),
+            color = MaterialTheme.colors.secondary,
+            fontSize = 12.sp
+          )
+          Spacer(Modifier.weight(1f))
+          RelayStatusIndicator(relay.relayStatus, connFailed = failedErr != null, memberStatus = m?.memberStatus)
+        }
+      }
+    }
+  }
+}
+
+@Composable
+private fun SubscriberChannelRelayBar(
+  hostnames: List<String>,
+  relayMembers: List<GroupMember>,
+  connectedCount: Int,
+  removedCount: Int,
+  failedCount: Int,
+  total: Int,
+  showProgress: Boolean,
+  relayListExpanded: MutableState<Boolean>
+) {
+  val errorCount = removedCount + failedCount
+  val allBroken = connectedCount == 0 && errorCount == total
+  Column(Modifier.background(MaterialTheme.colors.surface)) {
+    RelayBarHeader(relayListExpanded) {
+      if (total == 0) {
+        Text(generalGetString(MR.strings.relay_bar_no_relays), color = MaterialTheme.colors.secondary)
+        Icon(
+          painterResource(MR.images.ic_warning),
+          contentDescription = null,
+          tint = WarningOrange,
+          modifier = Modifier.size(18.dp)
+        )
+      } else if (allBroken) {
+        val statusText = if (removedCount == total) {
+          generalGetString(MR.strings.relay_bar_all_relays_removed)
+        } else if (failedCount == total) {
+          generalGetString(MR.strings.relay_bar_all_relays_failed)
+        } else {
+          generalGetString(MR.strings.relay_bar_no_active_relays)
+        }
+        Text(statusText, color = MaterialTheme.colors.secondary)
+        Icon(
+          painterResource(MR.images.ic_warning),
+          contentDescription = null,
+          tint = WarningOrange,
+          modifier = Modifier.size(18.dp)
+        )
+      } else if (connectedCount + removedCount + failedCount >= total && errorCount > 0) {
+        val statusText = if (failedCount > 0 && removedCount > 0) {
+          String.format(generalGetString(MR.strings.relay_bar_relays_not_active), failedCount + removedCount)
+        } else if (failedCount > 0) {
+          String.format(generalGetString(MR.strings.relay_bar_relays_failed), failedCount)
+        } else {
+          String.format(generalGetString(MR.strings.relay_bar_relays_removed), removedCount)
+        }
+        Text(statusText, color = MaterialTheme.colors.secondary)
+      } else {
+        if (showProgress && connectedCount + errorCount < total) {
+          RelayProgressIndicator(active = connectedCount, total = total)
+        }
+        val statusText = if (failedCount > 0 && removedCount > 0) {
+          String.format(generalGetString(MR.strings.relay_bar_connected_with_errors), connectedCount, total, errorCount)
+        } else if (failedCount > 0) {
+          String.format(generalGetString(MR.strings.relay_bar_connected_with_failures), connectedCount, total, failedCount)
+        } else if (removedCount > 0) {
+          String.format(generalGetString(MR.strings.relay_bar_connected_with_removed), connectedCount, total, removedCount)
+        } else {
+          String.format(generalGetString(MR.strings.relay_bar_connected), connectedCount, total)
+        }
+        Text(statusText, color = MaterialTheme.colors.secondary)
+      }
+    }
+    if (relayListExpanded.value) {
+      if (allBroken) {
+        Text(
+          generalGetString(MR.strings.relay_bar_subscriber_waiting),
+          modifier = Modifier.fillMaxWidth().padding(start = 12.dp, end = DEFAULT_PADDING, bottom = 4.dp),
+          color = MaterialTheme.colors.secondary,
+          fontSize = 12.sp
+        )
+      }
+      if (relayMembers.isEmpty()) {
+        hostnames.forEach { relay ->
+          RelayBarDetailRow {
+            Text(
+              String.format(generalGetString(MR.strings.via_relay_hostname), hostFromRelayLink(relay)),
+              color = MaterialTheme.colors.secondary,
+              fontSize = 12.sp
+            )
+            Spacer(Modifier.weight(1f))
+          }
+        }
+      } else {
+        relayMembers.forEach { m ->
+          val host = m.relayLink?.let { hostFromRelayLink(it) }
+          val failedErr = m.activeConn?.connFailedErr
+          RelayBarDetailRow(
+            onClick = if (failedErr != null) {
+              {
+                AlertManager.shared.showAlertMsg(
+                  title = generalGetString(MR.strings.relay_connection_failed),
+                  text = failedErr
+                )
+              }
+            } else null
+          ) {
+            Text(
+              String.format(generalGetString(MR.strings.via_relay_hostname), host ?: m.chatViewName),
+              color = MaterialTheme.colors.secondary,
+              fontSize = 12.sp
+            )
+            Spacer(Modifier.weight(1f))
+            val (statusText, statusColor) = relayConnStatus(m)
+            androidx.compose.foundation.Canvas(Modifier.size(8.dp)) {
+              drawCircle(color = statusColor)
+            }
+            Spacer(Modifier.width(4.dp))
+            Text(statusText, color = MaterialTheme.colors.secondary, fontSize = 12.sp)
+            if (failedErr != null) {
+              Spacer(Modifier.width(4.dp))
+              Icon(
+                painterResource(MR.images.ic_error),
+                contentDescription = null,
+                tint = MaterialTheme.colors.primary,
+                modifier = Modifier.size(14.dp)
+              )
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+@Composable
+private fun RelayBarHeader(
+  expanded: MutableState<Boolean>,
+  content: @Composable RowScope.() -> Unit
+) {
+  Row(
+    modifier = Modifier
+      .fillMaxWidth()
+      .clickable { expanded.value = !expanded.value }
+      .padding(start = 12.dp, end = DEFAULT_PADDING_HALF, top = 8.dp, bottom = if (expanded.value) 4.dp else 8.dp),
+    horizontalArrangement = Arrangement.spacedBy(8.dp),
+    verticalAlignment = Alignment.CenterVertically
+  ) {
+    content()
+    Spacer(Modifier.weight(1f))
+    Icon(
+      painterResource(if (expanded.value) MR.images.ic_chevron_down else MR.images.ic_chevron_up),
+      contentDescription = null,
+      tint = MaterialTheme.colors.secondary,
+      modifier = Modifier.size(20.dp)
+    )
+  }
+}
+
+@Composable
+private fun RelayBarDetailRow(
+  onClick: (() -> Unit)? = null,
+  content: @Composable RowScope.() -> Unit
+) {
+  val modifier = Modifier
+    .fillMaxWidth()
+    .padding(horizontal = 12.dp, vertical = 2.dp)
+  Row(
+    modifier = if (onClick != null) modifier.clickable(onClick = onClick) else modifier,
+    verticalAlignment = Alignment.CenterVertically
+  ) {
+    content()
+  }
+}
+
+private fun ownerRelayState(chat: Chat, chatModel: ChatModel): OwnerRelayState? {
+  val gInfo = (chat.chatInfo as? ChatInfo.Group)?.groupInfo ?: return null
+  if (!gInfo.useRelays || gInfo.membership.memberRole != GroupMemberRole.Owner ||
+    gInfo.membership.memberStatus in listOf(GroupMemberStatus.MemLeft, GroupMemberStatus.MemRemoved, GroupMemberStatus.MemGroupDeleted)
+  ) return null
+  val relays = if (ChannelRelaysModel.groupId.value == gInfo.groupId) ChannelRelaysModel.groupRelays.toList() else emptyList()
+  if (relays.isEmpty()) return OwnerRelayState(emptyList(), 0, 0, 0, true)
+  val relayMembers = relays.map { relay ->
+    relay to chatModel.groupMembers.value.firstOrNull { it.groupMemberId == relay.groupMemberId }
+  }
+  val removedCount = relayMembers.count { (_, m) -> relayMemberRemoved(m?.memberStatus) }
+  val activeCount = relayMembers.count { (relay, m) -> !relayMemberRemoved(m?.memberStatus) && relay.relayStatus == RelayStatus.Active && m?.activeConn?.connFailedErr == null }
+  val failedCount = relayMembers.count { (_, m) -> !relayMemberRemoved(m?.memberStatus) && m?.activeConn?.connFailedErr != null }
+  val noActiveRelays = activeCount == 0 && (failedCount + removedCount) == relays.size
+  return OwnerRelayState(relays, activeCount, failedCount, removedCount, noActiveRelays)
+}
+
+private data class OwnerRelayState(
+  val relays: List<GroupRelay>,
+  val activeCount: Int,
+  val failedCount: Int,
+  val removedCount: Int,
+  val noActiveRelays: Boolean
+)
+
+private fun relayMemberRemoved(status: GroupMemberStatus?): Boolean =
+  status in listOf(GroupMemberStatus.MemLeft, GroupMemberStatus.MemRemoved, GroupMemberStatus.MemGroupDeleted)
+

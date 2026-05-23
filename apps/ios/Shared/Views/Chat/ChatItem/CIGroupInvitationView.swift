@@ -5,10 +5,12 @@
 //  Created by JRoberts on 15.07.2022.
 //  Copyright © 2022 SimpleX Chat. All rights reserved.
 //
+// Spec: spec/client/chat-view.md
 
 import SwiftUI
 import SimpleXChat
 
+// Spec: spec/client/chat-view.md#CIGroupInvitationView
 struct CIGroupInvitationView: View {
     @EnvironmentObject var chatModel: ChatModel
     @EnvironmentObject var theme: AppTheme
@@ -84,12 +86,12 @@ struct CIGroupInvitationView: View {
         }
 
         if action {
-            v.onTapGesture {
+            v.simultaneousGesture(TapGesture().onEnded {
                 inProgress = true
                 joinGroup(groupInvitation.groupId) {
                     await MainActor.run { inProgress = false }
                 }
-            }
+            })
             .disabled(inProgress)
         } else {
             v

@@ -10,10 +10,10 @@ import chat.simplex.res.MR
 import kotlinx.coroutines.delay
 
 enum class NotificationAction {
-  ACCEPT_CONTACT_REQUEST,
-  ACCEPT_CONTACT_REQUEST_INCOGNITO
+  ACCEPT_CONTACT_REQUEST
 }
 
+// Spec: spec/services/notifications.md#ntfManager
 lateinit var ntfManager: NtfManager
 
 abstract class NtfManager {
@@ -31,8 +31,7 @@ abstract class NtfManager {
     msgText = generalGetString(MR.strings.notification_new_contact_request),
     image = cInfo.image,
     listOf(
-      NotificationAction.ACCEPT_CONTACT_REQUEST to { acceptContactRequestAction(user.userId, incognito = false, cInfo.id) },
-      NotificationAction.ACCEPT_CONTACT_REQUEST_INCOGNITO to { acceptContactRequestAction(user.userId, incognito = true, cInfo.id) }
+      NotificationAction.ACCEPT_CONTACT_REQUEST to { acceptContactRequestAction(user.userId, incognito = false, cInfo.id) }
     )
   )
 
@@ -45,20 +44,15 @@ abstract class NtfManager {
               chatModel.chatId.value != cInfo.id ||
               chatModel.remoteHostId() != rhId)
     ) {
-      displayNotification(user = user, chatId = cInfo.id, displayName = cInfo.displayName, msgText = hideSecrets(cItem))
+      displayNotification(user = user, chatId = cInfo.id, displayName = cInfo.displayName, msgText = hideSecrets(cItem, cInfo.isChannel))
     }
   }
 
   fun acceptContactRequestAction(userId: Long?, incognito: Boolean, chatId: ChatId) {
     val isCurrentUser = ChatModel.currentUser.value?.userId == userId
-    val cInfo: ChatInfo.ContactRequest? = if (isCurrentUser) {
-      (ChatModel.getChat(chatId)?.chatInfo as? ChatInfo.ContactRequest) ?: return
-    } else {
-      null
-    }
     val apiId = chatId.replace("<@", "").toLongOrNull() ?: return
     // TODO include remote host in notification
-    acceptContactRequest(null, incognito, apiId, cInfo, isCurrentUser, ChatModel)
+    acceptContactRequest(null, incognito, apiId, isCurrentUser, ChatModel)
     cancelNotificationsForChat(chatId)
   }
 
@@ -125,7 +119,7 @@ abstract class NtfManager {
     }
   }
 
-  private fun hideSecrets(cItem: ChatItem): String {
+  private fun hideSecrets(cItem: ChatItem, isChannel: Boolean = false): String {
     val md = cItem.formattedText
     return if (md != null) {
       var res = ""
@@ -136,9 +130,9 @@ abstract class NtfManager {
     } else {
       val mc = cItem.content.msgContent
       if (mc is MsgContent.MCReport) {
-        generalGetString(MR.strings.notification_group_report).format(cItem.text.ifEmpty { mc.reason.text })
+        generalGetString(MR.strings.notification_group_report).format(cItem.text(isChannel).ifEmpty { mc.reason.text })
       } else {
-        cItem.text
+        cItem.text(isChannel)
       }
     }
   }

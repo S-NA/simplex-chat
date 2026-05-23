@@ -21,13 +21,18 @@ import androidx.compose.ui.unit.*
 import chat.simplex.common.model.*
 import chat.simplex.common.platform.*
 import chat.simplex.common.ui.theme.*
+import chat.simplex.common.views.chat.*
 import chat.simplex.common.views.helpers.*
+import chat.simplex.common.views.newchat.planAndConnect
 import chat.simplex.res.MR
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlin.math.ceil
 
 @Composable
 fun FramedItemView(
-  chatInfo: ChatInfo,
+  chatsCtx: ChatModel.ChatsContext,
+  chat: Chat,
   ci: ChatItem,
   uriHandler: UriHandler? = null,
   imageProvider: (() -> ImageGalleryProvider)? = null,
@@ -39,8 +44,10 @@ fun FramedItemView(
   receiveFile: (Long) -> Unit,
   onLinkLongClick: (link: String) -> Unit = {},
   scrollToItem: (Long) -> Unit = {},
+  scrollToItemId: MutableState<Long?>,
   scrollToQuotedItemFromItem: (Long) -> Unit = {},
 ) {
+  val chatInfo = chat.chatInfo
   val sent = ci.chatDir.sent
   val chatTTL = chatInfo.timedMessagesTTL
 
@@ -49,7 +56,7 @@ fun FramedItemView(
   }
 
   @Composable
-  fun ciQuotedMsgTextView(qi: CIQuote, lines: Int, showTimestamp: Boolean) {
+  fun ciQuotedMsgTextView(qi: CIQuote, lines: Int, showTimestamp: Boolean, stripLink: String? = null, prefix: AnnotatedString? = null) {
     MarkdownText(
       qi.text,
       qi.formattedText,
@@ -60,11 +67,13 @@ fun FramedItemView(
       linkMode = linkMode,
       uriHandler = if (appPlatform.isDesktop) uriHandler else null,
       showTimestamp = showTimestamp,
+      prefix = prefix,
+      stripLink = stripLink,
     )
   }
 
   @Composable
-  fun ciQuotedMsgView(qi: CIQuote) {
+  fun ciQuotedMsgView(qi: CIQuote, stripLink: String? = null, prefix: AnnotatedString? = null) {
     Box(
       Modifier
         // this width limitation prevents crash on calculating constraints that may happen if you post veeeery long message and then quote it.
@@ -83,10 +92,10 @@ fun FramedItemView(
             style = TextStyle(fontSize = 13.5.sp, color = if (qi.chatDir is CIDirection.GroupSnd) CurrentColors.value.colors.primary else CurrentColors.value.colors.secondary),
             maxLines = 1
           )
-          ciQuotedMsgTextView(qi, lines = 2,  showTimestamp = showTimestamp)
+          ciQuotedMsgTextView(qi, lines = 2, showTimestamp = showTimestamp, stripLink = stripLink, prefix = prefix)
         }
       } else {
-        ciQuotedMsgTextView(qi, lines = 3,  showTimestamp = showTimestamp)
+        ciQuotedMsgTextView(qi, lines = 3, showTimestamp = showTimestamp, stripLink = stripLink, prefix = prefix)
       }
     }
   }
@@ -138,7 +147,7 @@ fun FramedItemView(
           Box(Modifier.fillMaxWidth().weight(1f)) {
             ciQuotedMsgView(qi)
           }
-          val imageBitmap = base64ToBitmap(qi.content.image)
+          val imageBitmap = remember(qi.content.image) { base64ToBitmap(qi.content.image) }
           Image(
             imageBitmap,
             contentDescription = stringResource(MR.strings.image_descr),
@@ -150,7 +159,7 @@ fun FramedItemView(
           Box(Modifier.fillMaxWidth().weight(1f)) {
             ciQuotedMsgView(qi)
           }
-          val imageBitmap = base64ToBitmap(qi.content.image)
+          val imageBitmap = remember(qi.content.image) { base64ToBitmap(qi.content.image) }
           Image(
             imageBitmap,
             contentDescription = stringResource(MR.strings.video_descr),
@@ -171,6 +180,20 @@ fun FramedItemView(
             tint = if (isInDarkTheme()) FileDark else FileLight
           )
         }
+        is MsgContent.MCChat -> {
+          val prefix = buildAnnotatedString {
+            append(qi.content.chatLink.displayName + if (qi.content.text != qi.content.chatLink.connLinkStr) " - " else "")
+          }
+          Box(Modifier.fillMaxWidth().weight(1f)) {
+            ciQuotedMsgView(qi, stripLink = qi.content.chatLink.connLinkStr, prefix = prefix)
+          }
+          Icon(
+            painterResource(qi.content.chatLink.smallIconRes),
+            null,
+            Modifier.padding(top = 6.dp, end = 4.dp).size(22.dp),
+            tint = if (isInDarkTheme()) FileDark else FileLight
+          )
+        }
         else -> ciQuotedMsgView(qi)
       }
     }
@@ -180,7 +203,7 @@ fun FramedItemView(
   fun ciFileView(ci: ChatItem, text: String) {
     CIFileView(ci.file, ci.meta.itemEdited, showMenu, false, receiveFile)
     if (text != "" || ci.meta.isLive) {
-      CIMarkdownText(ci, chatInfo, chatTTL, linkMode = linkMode, uriHandler, showViaProxy = showViaProxy,  showTimestamp = showTimestamp)
+      CIMarkdownText(chatsCtx, ci, chat, chatTTL, linkMode = linkMode, uriHandler, showViaProxy = showViaProxy,  showTimestamp = showTimestamp)
     }
   }
 
@@ -201,7 +224,7 @@ fun FramedItemView(
     var metaColor = MaterialTheme.colors.secondary
     Box(contentAlignment = Alignment.BottomEnd) {
       val chatItemTail = remember { appPreferences.chatItemTail.state }
-      val style = shapeStyle(ci, chatItemTail.value, tailVisible, revealed = true)
+      val style = shapeStyle(ci, chatItemTail.value, tailVisible, true)
       val tailRendered = style is ShapeStyle.Bubble && style.tailVisible
       Column(
         Modifier
@@ -253,7 +276,11 @@ fun FramedItemView(
                   onLongClick = { showMenu.value = true },
                   onClick = {
                     if (ci.quotedItem.itemId != null) {
-                      scrollToItem(ci.quotedItem.itemId)
+                      if (ci.isReport && chatsCtx.secondaryContextFilter != null) {
+                        scrollToItemId.value = ci.quotedItem.itemId
+                      } else {
+                        scrollToItem(ci.quotedItem.itemId)
+                      }
                     } else {
                       scrollToQuotedItemFromItem(ci.id)
                     }
@@ -289,7 +316,7 @@ fun FramedItemView(
                 if (mc.text == "" && !ci.meta.isLive) {
                   metaColor = Color.White
                 } else {
-                  CIMarkdownText(ci, chatInfo, chatTTL, linkMode, uriHandler, showViaProxy = showViaProxy, showTimestamp = showTimestamp)
+                  CIMarkdownText(chatsCtx, ci, chat, chatTTL, linkMode, uriHandler, showViaProxy = showViaProxy, showTimestamp = showTimestamp)
                 }
               }
               is MsgContent.MCVideo -> {
@@ -297,37 +324,53 @@ fun FramedItemView(
                 if (mc.text == "" && !ci.meta.isLive) {
                   metaColor = Color.White
                 } else {
-                  CIMarkdownText(ci, chatInfo, chatTTL, linkMode, uriHandler, showViaProxy = showViaProxy, showTimestamp = showTimestamp)
+                  CIMarkdownText(chatsCtx, ci, chat, chatTTL, linkMode, uriHandler, showViaProxy = showViaProxy, showTimestamp = showTimestamp)
                 }
               }
               is MsgContent.MCVoice -> {
                 CIVoiceView(mc.duration, ci.file, ci.meta.itemEdited, ci.chatDir.sent, hasText = true, ci, timedMessagesTTL = chatTTL, showViaProxy = showViaProxy, showTimestamp = showTimestamp, longClick = { onLinkLongClick("") }, receiveFile = receiveFile)
                 if (mc.text != "") {
-                  CIMarkdownText(ci, chatInfo, chatTTL, linkMode, uriHandler, showViaProxy = showViaProxy, showTimestamp = showTimestamp)
+                  CIMarkdownText(chatsCtx, ci, chat, chatTTL, linkMode, uriHandler, showViaProxy = showViaProxy, showTimestamp = showTimestamp)
                 }
               }
               is MsgContent.MCFile -> ciFileView(ci, mc.text)
               is MsgContent.MCUnknown ->
                 if (ci.file == null) {
-                  CIMarkdownText(ci, chatInfo, chatTTL, linkMode, uriHandler, onLinkLongClick, showViaProxy = showViaProxy, showTimestamp = showTimestamp)
+                  CIMarkdownText(chatsCtx, ci, chat, chatTTL, linkMode, uriHandler, onLinkLongClick, showViaProxy = showViaProxy, showTimestamp = showTimestamp)
                 } else {
                   ciFileView(ci, mc.text)
                 }
               is MsgContent.MCLink -> {
                 ChatItemLinkView(mc.preview, showMenu, onLongClick = { showMenu.value = true })
                 Box(Modifier.widthIn(max = DEFAULT_MAX_IMAGE_WIDTH)) {
-                  CIMarkdownText(ci, chatInfo, chatTTL, linkMode, uriHandler, onLinkLongClick, showViaProxy = showViaProxy, showTimestamp = showTimestamp)
+                  CIMarkdownText(chatsCtx, ci, chat, chatTTL, linkMode, uriHandler, onLinkLongClick, showViaProxy = showViaProxy, showTimestamp = showTimestamp)
+                }
+              }
+              is MsgContent.MCChat -> {
+                val hasText = mc.text != mc.chatLink.connLinkStr
+                Box(
+                  Modifier.combinedClickable(
+                    onClick = {
+                      withBGApi { planAndConnect(chat.remoteHostId, mc.chatLink.connLinkStr, linkOwnerSig = mc.ownerSig, close = null) }
+                    },
+                    onLongClick = { showMenu.value = true }
+                  )
+                ) {
+                  CIChatLinkHeader(chatLink = mc.chatLink, ownerSig = mc.ownerSig, hasText = hasText)
+                }
+                if (hasText) {
+                  CIMarkdownText(chatsCtx, ci, chat, chatTTL, linkMode, uriHandler, showViaProxy = showViaProxy, showTimestamp = showTimestamp, stripLink = mc.chatLink.connLinkStr)
                 }
               }
               is MsgContent.MCReport -> {
                 val prefix = buildAnnotatedString {
                   withStyle(SpanStyle(color = Color.Red, fontStyle = FontStyle.Italic)) {
-                    append(if (mc.text.isEmpty()) mc.reason.text else "${mc.reason.text}: ")
+                    append(itemPrefixText(ci))
                   }
                 }
-                CIMarkdownText(ci, chatInfo, chatTTL, linkMode, uriHandler, onLinkLongClick, showViaProxy = showViaProxy, showTimestamp = showTimestamp, prefix = prefix)
+                CIMarkdownText(chatsCtx, ci, chat, chatTTL, linkMode, uriHandler, onLinkLongClick, showViaProxy = showViaProxy, showTimestamp = showTimestamp, prefix = prefix)
               }
-              else -> CIMarkdownText(ci, chatInfo, chatTTL, linkMode, uriHandler, onLinkLongClick, showViaProxy = showViaProxy, showTimestamp = showTimestamp)
+              else -> CIMarkdownText(chatsCtx, ci, chat, chatTTL, linkMode, uriHandler, onLinkLongClick, showViaProxy = showViaProxy, showTimestamp = showTimestamp)
             }
           }
         }
@@ -347,29 +390,64 @@ fun FramedItemView(
 
 @Composable
 fun CIMarkdownText(
+  chatsCtx: ChatModel.ChatsContext,
   ci: ChatItem,
-  chatInfo: ChatInfo,
+  chat: Chat,
   chatTTL: Int?,
   linkMode: SimplexLinkMode,
   uriHandler: UriHandler?,
   onLinkLongClick: (link: String) -> Unit = {},
   showViaProxy: Boolean,
   showTimestamp: Boolean,
-  prefix: AnnotatedString? = null
+  prefix: AnnotatedString? = null,
+  stripLink: String? = null
 ) {
-  Box(Modifier.padding(vertical = 7.dp, horizontal = 12.dp)) {
-    val text = if (ci.meta.isLive) ci.content.msgContent?.text ?: ci.text else ci.text
+  val chatInfo = chat.chatInfo
+  val text = if (ci.meta.isLive) ci.content.msgContent?.text ?: ci.text else ci.text
+  val selection = setupItemSelection(LocalSelectionManager.current, LocalItemContext.current.selectionIndex, ci.meta.isLive == true)
+
+  Box(Modifier.padding(vertical = 7.dp, horizontal = 12.dp).then(selection.positionModifier)) {
     MarkdownText(
       text, if (text.isEmpty()) emptyList() else ci.formattedText, toggleSecrets = true,
+      sendCommandMsg = if (chatInfo.useCommands && chat.chatInfo.sndReady) { { msg -> sendCommandMsg(chatsCtx, chat, msg) } } else null,
       meta = ci.meta, chatTTL = chatTTL, linkMode = linkMode,
       mentions = ci.mentions, userMemberId = when {
         chatInfo is ChatInfo.Group -> chatInfo.groupInfo.membership.memberId
         else -> null
       },
-      uriHandler = uriHandler, senderBold = true, onLinkLongClick = onLinkLongClick, showViaProxy = showViaProxy, showTimestamp = showTimestamp, prefix = prefix
+      uriHandler = uriHandler, senderBold = true, onLinkLongClick = onLinkLongClick, showViaProxy = showViaProxy, showTimestamp = showTimestamp, prefix = prefix,
+      stripLink = stripLink,
+      selectionRange = selection.highlightRange,
+      onTextLayoutResult = selection.onTextLayoutResult
     )
   }
 }
+
+fun sendCommandMsg(chatsCtx: ChatModel.ChatsContext, chat: Chat, msg: String) {
+  if (chat.chatInfo.sndReady) {
+    withLongRunningApi(slow = 60_000) {
+      val cInfo = chat.chatInfo
+      val chatItems =
+        chatModel.controller.apiSendMessages(
+          rh = chat.remoteHostId,
+          type = cInfo.chatType,
+          id = cInfo.apiId,
+          scope = cInfo.groupChatScope(),
+          composedMessages = listOf(ComposedMessage(fileSource = null, quotedItemId = null, msgContent = MsgContent.MCText(msg), mentions = emptyMap()))
+        )
+      if (!chatItems.isNullOrEmpty()) {
+        chatItems.forEach { aChatItem ->
+          withContext(Dispatchers.Main) {
+            chatsCtx.addChatItem(chat.remoteHostId, aChatItem.chatInfo, aChatItem.chatItem)
+          }
+        }
+      }
+    }
+  } else {
+    AlertManager.shared.showAlertMsg(MR.strings.cant_send_message_alert_title, MR.strings.cant_send_commands_alert_text)
+  }
+}
+
 
 const val CHAT_IMAGE_LAYOUT_ID = "chatImage"
 const val CHAT_BUBBLE_LAYOUT_ID = "chatBubble"
@@ -398,7 +476,10 @@ fun PriorityLayout(
   ) { measureable, constraints ->
     // Find important element which should tell what max width other elements can use
     // Expecting only one such element. Can be less than one but not more
-    val imagePlaceable = measureable.firstOrNull { it.layoutId == priorityLayoutId }?.measure(constraints)
+    // Max image height for chat item display, taller images are cropped
+    val maxImageHeight = (constraints.maxWidth * 2.33f).toInt().coerceAtMost(constraints.maxHeight)
+    val imageConstraints = constraints.copy(maxHeight = maxImageHeight)
+    val imagePlaceable = measureable.firstOrNull { it.layoutId == priorityLayoutId }?.measure(imageConstraints)
     val placeables: List<Placeable> = measureable.map {
       if (it.layoutId == priorityLayoutId)
         imagePlaceable!!

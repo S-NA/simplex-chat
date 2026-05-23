@@ -5,6 +5,7 @@
 //  Created by Evgeny on 19/06/2022.
 //  Copyright © 2022 SimpleX Chat. All rights reserved.
 //
+// Spec: spec/database.md
 
 import SwiftUI
 import SimpleXChat
@@ -21,7 +22,7 @@ enum DatabaseAlert: Identifiable {
     case deleteLegacyDatabase
     case deleteFilesAndMedia
     case setChatItemTTL(ttl: ChatItemTTL)
-    case error(title: LocalizedStringKey, error: String = "")
+    case error(title: String, error: String = "")
 
     var id: String {
         switch self {
@@ -41,6 +42,7 @@ enum DatabaseAlert: Identifiable {
     }
 }
 
+// Spec: spec/database.md#DatabaseView
 struct DatabaseView: View {
     @EnvironmentObject var m: ChatModel
     @EnvironmentObject var theme: AppTheme
@@ -456,7 +458,7 @@ struct DatabaseView: View {
             }
         } catch let error {
             await MainActor.run {
-                alert = .error(title: "Error exporting chat database", error: responseError(error))
+                alert = .error(title: NSLocalizedString("Error exporting chat database", comment: "alert title"), error: responseError(error))
                 progressIndicator = false
             }
         }
@@ -492,10 +494,10 @@ struct DatabaseView: View {
                         return migration
                     }
                 } catch let error {
-                    await operationEnded(.error(title: "Error importing chat database", error: responseError(error)), progressIndicator, alert)
+                    await operationEnded(.error(title: NSLocalizedString("Error importing chat database", comment: "alert title"), error: responseError(error)), progressIndicator, alert)
                 }
             } catch let error {
-                await operationEnded(.error(title: "Error deleting chat database", error: responseError(error)), progressIndicator, alert)
+                await operationEnded(.error(title: NSLocalizedString("Error deleting chat database", comment: "alert title"), error: responseError(error)), progressIndicator, alert)
             }
         } else {
             showAlert("Error accessing database file")
@@ -513,7 +515,7 @@ struct DatabaseView: View {
             await DatabaseView.operationEnded(.chatDeleted, $progressIndicator, $alert)
             return true
         } catch let error {
-            await DatabaseView.operationEnded(.error(title: "Error deleting database", error: responseError(error)), $progressIndicator, $alert)
+            await DatabaseView.operationEnded(.error(title: NSLocalizedString("Error deleting database", comment: "alert title"), error: responseError(error)), $progressIndicator, $alert)
             return false
         }
     }
@@ -522,7 +524,7 @@ struct DatabaseView: View {
         if removeLegacyDatabaseAndFiles() {
             legacyDatabase = false
         } else {
-            alert = .error(title: "Error deleting old database")
+            alert = .error(title: NSLocalizedString("Error deleting old database", comment: "alert title"))
         }
     }
 
@@ -546,7 +548,7 @@ struct DatabaseView: View {
                 let (title, message) = chatDeletedAlertText()
                 showAlert(title, message: message, actions: { [okAlertActionWaiting] })
             } else if case let .error(title, error) = dbAlert {
-                showAlert("\(title)", message: error, actions: { [okAlertActionWaiting] })
+                showAlert(title, message: error, actions: { [okAlertActionWaiting] })
             } else {
                 alert.wrappedValue = dbAlert
                 cont.resume()
@@ -567,7 +569,7 @@ struct DatabaseView: View {
                 }
             } catch {
                 await MainActor.run {
-                    alert = .error(title: "Error changing setting", error: responseError(error))
+                    alert = .error(title: NSLocalizedString("Error changing setting", comment: "alert title"), error: responseError(error))
                     chatItemTTL = currentChatItemTTL
                     afterSetCiTTL()
                 }

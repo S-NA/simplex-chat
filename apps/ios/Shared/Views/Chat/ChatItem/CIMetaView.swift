@@ -5,17 +5,19 @@
 //  Created by Evgeny Poberezkin on 11/02/2022.
 //  Copyright © 2022 SimpleX Chat. All rights reserved.
 //
+// Spec: spec/client/chat-view.md
 
 import SwiftUI
 import SimpleXChat
 
+// Spec: spec/client/chat-view.md#CIMetaView
 struct CIMetaView: View {
     @ObservedObject var chat: Chat
     @EnvironmentObject var theme: AppTheme
     @Environment(\.showTimestamp) var showTimestamp: Bool
     var chatItem: ChatItem
     var metaColor: Color
-    var paleMetaColor = Color(UIColor.tertiaryLabel)
+    var paleMetaColor = Color(uiColor: .tertiaryLabel)
     var showStatus = true
     var showEdited = true
     var invertedMaterial = false
@@ -152,11 +154,13 @@ func ciMetaText(
     return r.font(.caption)
 }
 
+@inline(__always)
 private func statusIconText(_ icon: String, _ color: Color?) -> Text {
     colored(Text(Image(systemName: icon)), color)
 }
 
 // Applying `foregroundColor(nil)` breaks `.invertedForegroundStyle` modifier
+@inline(__always)
 private func colored(_ t: Text, _ color: Color?) -> Text {
     if let color {
         t.foregroundColor(color)

@@ -40,9 +40,9 @@ import chat.simplex.common.ui.theme.*
 import chat.simplex.common.views.helpers.*
 import chat.simplex.common.views.usersettings.*
 import chat.simplex.common.platform.*
-import chat.simplex.common.views.chat.group.ChatTTLSection
+import chat.simplex.common.views.chat.group.ChatTTLOption
+import chat.simplex.common.views.chat.item.MarkdownText
 import chat.simplex.common.views.chatlist.updateChatSettings
-import chat.simplex.common.views.database.*
 import chat.simplex.common.views.newchat.*
 import chat.simplex.res.MR
 import kotlinx.coroutines.*
@@ -72,9 +72,6 @@ fun ChatInfoView(
   val connStats = remember(contact.id, connectionStats) { mutableStateOf(connectionStats) }
   val developerTools = chatModel.controller.appPrefs.developerTools.get()
   if (chat != null && currentUser != null) {
-    val contactNetworkStatus = remember(chatModel.networkStatuses.toMap(), contact) {
-      mutableStateOf(chatModel.contactNetworkStatus(contact))
-    }
     val chatRh = chat.remoteHostId
     val sendReceipts = remember(contact.id) { mutableStateOf(SendReceipts.fromBool(contact.chatSettings.sendRcpts, currentUser.sendRcptsContacts)) }
     val chatItemTTL = remember(contact.id) { mutableStateOf(if (contact.chatItemTTL != null) ChatItemTTL.fromSeconds(contact.chatItemTTL) else null) }
@@ -101,7 +98,6 @@ fun ChatInfoView(
         setChatTTLAlert(chatsCtx, chat.remoteHostId, chat.chatInfo, chatItemTTL, previousChatTTL, deletingItems)
       },
       connStats = connStats,
-      contactNetworkStatus.value,
       customUserProfile,
       localAlias,
       connectionCode,
@@ -524,7 +520,6 @@ fun ChatInfoLayout(
   chatItemTTL: MutableState<ChatItemTTL?>,
   setChatItemTTL: (ChatItemTTL?) -> Unit,
   connStats: MutableState<ConnectionStats?>,
-  contactNetworkStatus: NetworkStatus,
   customUserProfile: Profile?,
   localAlias: String,
   connectionCode: String?,
@@ -617,7 +612,10 @@ fun ChatInfoLayout(
     }
     SectionDividerSpaced(maxBottomPadding = false)
 
-    ChatTTLSection(chatItemTTL, setChatItemTTL, deletingItems)
+    SectionView {
+      ChatTTLOption(chatItemTTL, setChatItemTTL, deletingItems)
+      SectionTextFooter(stringResource(MR.strings.chat_ttl_options_footer))
+    }
     SectionDividerSpaced(maxTopPadding = true, maxBottomPadding = false)
 
     val conn = contact.activeConn
@@ -640,13 +638,16 @@ fun ChatInfoLayout(
 
     if (contact.ready && contact.active) {
       SectionView(title = stringResource(MR.strings.conn_stats_section_title_servers)) {
-        SectionItemView({
-          AlertManager.shared.showAlertMsg(
-            generalGetString(MR.strings.network_status),
-            contactNetworkStatus.statusExplanation
-          )
-        }) {
-          NetworkStatusRow(contactNetworkStatus)
+        val chatSubStatus = chatModel.chatSubStatus.value
+        if (chatSubStatus != null) {
+          SectionItemView({
+            AlertManager.shared.showAlertMsg(
+              generalGetString(MR.strings.network_status),
+              chatSubStatus.statusExplanation
+            )
+          }) {
+            SubStatusRow(chatSubStatus)
+          }
         }
         if (cStats != null) {
           SwitchAddressButton(
@@ -704,15 +705,16 @@ fun ChatInfoLayout(
 @Composable
 fun ChatInfoHeader(cInfo: ChatInfo, contact: Contact) {
   Column(
-    Modifier.padding(horizontal = 8.dp),
+    Modifier.padding(horizontal = DEFAULT_PADDING),
     horizontalAlignment = Alignment.CenterHorizontally
   ) {
     ChatInfoImage(cInfo, size = 192.dp, iconColor = if (isInDarkTheme()) GroupDark else SettingsSecondaryLight)
+    val displayName = contact.profile.displayName.trim()
     val text = buildAnnotatedString {
       if (contact.verified) {
         appendInlineContent(id = "shieldIcon")
       }
-      append(contact.profile.displayName)
+      append(displayName)
     }
     val inlineContent: Map<String, InlineTextContent> = mapOf(
       "shieldIcon" to InlineTextContent(
@@ -722,10 +724,11 @@ fun ChatInfoHeader(cInfo: ChatInfo, contact: Contact) {
       }
     )
     val clipboard = LocalClipboardManager.current
-    val copyNameToClipboard = {
-      clipboard.setText(AnnotatedString(contact.profile.displayName))
+    val copyNameToClipboard = fun (name: String) {
+      clipboard.setText(AnnotatedString(name))
       showToast(generalGetString(MR.strings.copied))
     }
+    val copyDisplayName = { copyNameToClipboard(displayName) }
     Text(
       text,
       inlineContent = inlineContent,
@@ -733,18 +736,39 @@ fun ChatInfoHeader(cInfo: ChatInfo, contact: Contact) {
       textAlign = TextAlign.Center,
       maxLines = 3,
       overflow = TextOverflow.Ellipsis,
-      modifier = Modifier.combinedClickable(onClick = copyNameToClipboard, onLongClick = copyNameToClipboard).onRightClick(copyNameToClipboard)
+      modifier = Modifier.combinedClickable(onClick = copyDisplayName, onLongClick = copyDisplayName).onRightClick(copyDisplayName)
     )
-    if (cInfo.fullName != "" && cInfo.fullName != cInfo.displayName && cInfo.fullName != contact.profile.displayName) {
-      Text(
-        cInfo.fullName, style = MaterialTheme.typography.h2,
-        color = MaterialTheme.colors.onBackground,
-        textAlign = TextAlign.Center,
-        maxLines = 4,
-        overflow = TextOverflow.Ellipsis,
-        modifier = Modifier.combinedClickable(onClick = copyNameToClipboard, onLongClick = copyNameToClipboard).onRightClick(copyNameToClipboard)
-      )
-    }
+    ChatInfoDescription(cInfo, displayName, copyNameToClipboard)
+  }
+}
+
+@Composable
+fun ChatInfoDescription(c: NamedChat, displayName: String, copyNameToClipboard: (String) -> Unit) {
+  val fullName = c.fullName.trim()
+  if (fullName != "" && fullName != displayName && fullName != c.displayName.trim()) {
+    val copyFullName = { copyNameToClipboard(fullName) }
+    Text(
+      fullName, style = MaterialTheme.typography.h2,
+      color = MaterialTheme.colors.onBackground,
+      textAlign = TextAlign.Center,
+      maxLines = 3,
+      overflow = TextOverflow.Ellipsis,
+      modifier = Modifier.padding(top = DEFAULT_PADDING_HALF).combinedClickable(onClick = copyFullName, onLongClick = copyFullName).onRightClick(copyFullName)
+    )
+  }
+  val descr = c.shortDescr?.trim()
+  if (descr != null && descr != "") {
+    MarkdownText(
+      descr,
+      parseToMarkdown(descr),
+      toggleSecrets = true,
+      style = MaterialTheme.typography.body2.copy(color = MaterialTheme.colors.onBackground, lineHeight = 21.sp, textAlign = TextAlign.Center),
+      maxLines = 4,
+      overflow = TextOverflow.Ellipsis,
+      uriHandler = LocalUriHandler.current,
+      modifier = Modifier.padding(top = DEFAULT_PADDING_HALF),
+      linkMode = chatModel.simplexLinkMode.value
+    )
   }
 }
 
@@ -932,7 +956,7 @@ fun CallButton(
             }
           }
         } }
-        contact.nextSendGrpInv -> { { showCantCallContactSendMessageAlert() } }
+        contact.sendMsgToConnect -> { { showCantCallContactSendMessageAlert() } }
         !contact.active -> { { showCantCallContactDeletedAlert() } }
         !contact.ready -> { { showCantCallContactConnectingAlert() } }
         needToAllowCallsToContact -> { { showNeedToAllowCallsAlert(onConfirm = { allowCallsToContact(chat) }) } }
@@ -1037,7 +1061,7 @@ fun InfoViewActionButton(
 }
 
 @Composable
-private fun NetworkStatusRow(networkStatus: NetworkStatus) {
+fun SubStatusRow(subStatus: SubscriptionStatus) {
   Row(
     Modifier.fillMaxSize(),
     horizontalArrangement = Arrangement.SpaceBetween,
@@ -1060,25 +1084,24 @@ private fun NetworkStatusRow(networkStatus: NetworkStatus) {
       horizontalArrangement = Arrangement.spacedBy(4.dp)
     ) {
       Text(
-        networkStatus.statusString,
+        subStatus.statusString,
         color = MaterialTheme.colors.secondary
       )
-      ServerImage(networkStatus)
+      ServerImage(subStatus)
     }
   }
 }
 
 @Composable
-private fun ServerImage(networkStatus: NetworkStatus) {
+private fun ServerImage(subStatus: SubscriptionStatus) {
   Box(Modifier.size(18.dp)) {
-    when (networkStatus) {
-      is NetworkStatus.Connected ->
+    when (subStatus) {
+      is SubscriptionStatus.Active ->
         Icon(painterResource(MR.images.ic_circle_filled), stringResource(MR.strings.icon_descr_server_status_connected), tint = Color.Green)
-      is NetworkStatus.Disconnected ->
+      is SubscriptionStatus.Pending ->
         Icon(painterResource(MR.images.ic_pending_filled), stringResource(MR.strings.icon_descr_server_status_disconnected), tint = MaterialTheme.colors.secondary)
-      is NetworkStatus.Error ->
+      is SubscriptionStatus.Removed, SubscriptionStatus.NoSub ->
         Icon(painterResource(MR.images.ic_error_filled), stringResource(MR.strings.icon_descr_server_status_error), tint = MaterialTheme.colors.secondary)
-      else -> Icon(painterResource(MR.images.ic_circle), stringResource(MR.strings.icon_descr_server_status_pending), tint = MaterialTheme.colors.secondary)
     }
   }
 }
@@ -1384,7 +1407,7 @@ private fun setChatTTL(
 private suspend fun afterSetChatTTL(chatsCtx: ChatModel.ChatsContext, rhId: Long?, chatInfo: ChatInfo, progressIndicator: MutableState<Boolean>) {
   try {
     val pagination = ChatPagination.Initial(ChatPagination.INITIAL_COUNT)
-    val (chat, navInfo) = controller.apiGetChat(rhId, chatInfo.chatType, chatInfo.apiId, null, pagination) ?: return
+    val (chat, navInfo) = controller.apiGetChat(rhId, chatInfo.chatType, chatInfo.apiId, scope = null, contentTag = null, pagination) ?: return
     if (chat.chatItems.isEmpty()) {
       // replacing old chat with the same old chat but without items. Less intrusive way of clearing a preview
       withContext(Dispatchers.Main) {
@@ -1429,7 +1452,6 @@ fun PreviewChatInfoLayout() {
       connectionCode = "123",
       developerTools = false,
       connStats = remember { mutableStateOf(null) },
-      contactNetworkStatus = NetworkStatus.Connected(),
       onLocalAliasChanged = {},
       customUserProfile = null,
       openPreferences = {},

@@ -1,9 +1,10 @@
+import org.gradle.internal.extensions.stdlib.toDefaultLowerCase
 import org.jetbrains.compose.desktop.application.dsl.TargetFormat
-import org.jetbrains.kotlin.util.capitalizeDecapitalize.toLowerCaseAsciiOnly
 
 plugins {
   kotlin("multiplatform")
   id("org.jetbrains.compose")
+  id("org.jetbrains.kotlin.plugin.compose")
   id("io.github.tomtzook.gradle-cmake") version "1.2.2"
 }
 
@@ -39,6 +40,7 @@ compose {
       }
       mainClass = "chat.simplex.desktop.MainKt"
       nativeDistributions {
+        copyright = "(c) 2020-2026 SimpleX Chat"
         // For debugging via VisualVM
         if (debugJava) {
           modules("jdk.zipfs", "jdk.unsupported", "jdk.management.agent")
@@ -71,6 +73,12 @@ compose {
           iconFile.set(project.file("src/jvmMain/resources/distribute/simplex.icns"))
           appCategory = "public.app-category.social-networking"
           bundleID = "chat.simplex.app"
+          infoPlist {
+            extraKeysRawXml = """
+              <key>NSMicrophoneUsageDescription</key>
+              <string>SimpleX needs microphone access to record voice messages</string>
+            """
+          }
           val identity = rootProject.extra["desktop.mac.signing.identity"] as String?
           val keychain = rootProject.extra["desktop.mac.signing.keychain"] as String?
           val appleId = rootProject.extra["desktop.mac.notarization.apple_id"] as String?
@@ -89,7 +97,7 @@ compose {
             }
           }
         }
-        val os = System.getProperty("os.name", "generic").toLowerCaseAsciiOnly()
+        val os = System.getProperty("os.name", "generic").toDefaultLowerCase()
         if (os.contains("mac") || os.contains("win")) {
           packageName = "SimpleX"
         } else {

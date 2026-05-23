@@ -13,6 +13,7 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.*
 import androidx.compose.runtime.*
@@ -20,9 +21,11 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
@@ -34,9 +37,11 @@ import chat.simplex.common.model.ChatController.appPrefs
 import chat.simplex.common.model.ChatModel.controller
 import chat.simplex.common.platform.*
 import chat.simplex.common.ui.theme.*
+import chat.simplex.common.views.chat.item.CIFileViewScope
 import chat.simplex.common.views.chat.topPaddingToContent
 import chat.simplex.common.views.helpers.*
 import chat.simplex.common.views.usersettings.*
+import chat.simplex.common.BuildConfigCommon
 import chat.simplex.res.MR
 import kotlinx.coroutines.*
 
@@ -45,7 +50,7 @@ enum class NewChatOption {
 }
 
 @Composable
-fun ModalData.NewChatView(rh: RemoteHostInfo?, selection: NewChatOption, showQRCodeScanner: Boolean = false, close: () -> Unit) {
+fun ModalData.NewChatView(rh: RemoteHostInfo?, selection: NewChatOption, showQRCodeScanner: Boolean = false, onboarding: Boolean = false, close: () -> Unit) {
   val selection = remember { stateGetOrPut("selection") { selection } }
   val showQRCodeScanner = remember { stateGetOrPut("showQRCodeScanner") { showQRCodeScanner } }
   val contactConnection: MutableState<PendingContactConnection?> = rememberSaveable(stateSaver = serializableSaver()) { mutableStateOf(chatModel.showingInvitation.value?.conn) }
@@ -102,60 +107,71 @@ fun ModalData.NewChatView(rh: RemoteHostInfo?, selection: NewChatOption, showQRC
     }
   }
 
-  BoxWithConstraints {
+  if (onboarding) {
     ColumnWithScrollBar {
-      AppBarTitle(stringResource(MR.strings.new_chat), hostDevice(rh?.remoteHostId), bottomPadding = DEFAULT_PADDING)
-      val scope = rememberCoroutineScope()
-      val pagerState = rememberPagerState(
-        initialPage = selection.value.ordinal,
-        initialPageOffsetFraction = 0f
-      ) { NewChatOption.values().size }
-      KeyChangeEffect(pagerState.currentPage) {
-        selection.value = NewChatOption.values()[pagerState.currentPage]
+      Spacer(Modifier.height(DEFAULT_PADDING))
+      when (selection.value) {
+        NewChatOption.INVITE -> PrepareAndInviteView(rh?.remoteHostId, contactConnection, connLinkInvitation, creatingConnReq, onboarding = true)
+        NewChatOption.CONNECT -> ConnectView(rh?.remoteHostId, showQRCodeScanner, pastedLink, close, onboarding = true)
       }
-      TabRow(
-        selectedTabIndex = pagerState.currentPage,
-        backgroundColor = Color.Transparent,
-        contentColor = MaterialTheme.colors.primary,
-      ) {
-        tabTitles.forEachIndexed { index, it ->
-          LeadingIconTab(
-            selected = pagerState.currentPage == index,
-            onClick = {
-              scope.launch {
-                pagerState.animateScrollToPage(index)
-              }
-            },
-            text = { Text(it, fontSize = 13.sp) },
-            icon = {
-              Icon(
-                if (NewChatOption.INVITE.ordinal == index) painterResource(MR.images.ic_repeat_one) else painterResource(MR.images.ic_qr_code),
-                it
-              )
-            },
-            selectedContentColor = MaterialTheme.colors.primary,
-            unselectedContentColor = MaterialTheme.colors.secondary,
-          )
+      SectionBottomSpacer()
+    }
+  } else {
+    BoxWithConstraints {
+      ColumnWithScrollBar {
+        AppBarTitle(stringResource(MR.strings.new_chat), hostDevice(rh?.remoteHostId), bottomPadding = DEFAULT_PADDING)
+        val scope = rememberCoroutineScope()
+        val pagerState = rememberPagerState(
+          initialPage = selection.value.ordinal,
+          initialPageOffsetFraction = 0f
+        ) { NewChatOption.values().size }
+        KeyChangeEffect(pagerState.currentPage) {
+          selection.value = NewChatOption.values()[pagerState.currentPage]
         }
-      }
-
-      HorizontalPager(state = pagerState, Modifier, pageNestedScrollConnection = LocalAppBarHandler.current!!.connection, verticalAlignment = Alignment.Top, userScrollEnabled = appPlatform.isAndroid) { index ->
-        Column(
-          Modifier
-            .fillMaxWidth()
-            .heightIn(min = this@BoxWithConstraints.maxHeight - 150.dp),
-          verticalArrangement = if (index == NewChatOption.INVITE.ordinal && connLinkInvitation.connFullLink.isEmpty()) Arrangement.Center else Arrangement.Top
+        TabRow(
+          selectedTabIndex = pagerState.currentPage,
+          backgroundColor = Color.Transparent,
+          contentColor = MaterialTheme.colors.primary,
         ) {
-          Spacer(Modifier.height(DEFAULT_PADDING))
-          when (index) {
-            NewChatOption.INVITE.ordinal -> {
-              PrepareAndInviteView(rh?.remoteHostId, contactConnection, connLinkInvitation, creatingConnReq)
-            }
-            NewChatOption.CONNECT.ordinal -> {
-              ConnectView(rh?.remoteHostId, showQRCodeScanner, pastedLink, close)
-            }
+          tabTitles.forEachIndexed { index, it ->
+            LeadingIconTab(
+              selected = pagerState.currentPage == index,
+              onClick = {
+                scope.launch {
+                  pagerState.animateScrollToPage(index)
+                }
+              },
+              text = { Text(it, fontSize = 13.sp) },
+              icon = {
+                Icon(
+                  if (NewChatOption.INVITE.ordinal == index) painterResource(MR.images.ic_repeat_one) else painterResource(MR.images.ic_qr_code),
+                  it
+                )
+              },
+              selectedContentColor = MaterialTheme.colors.primary,
+              unselectedContentColor = MaterialTheme.colors.secondary,
+            )
           }
-          SectionBottomSpacer()
+        }
+
+        HorizontalPager(state = pagerState, Modifier, pageNestedScrollConnection = LocalAppBarHandler.current!!.connection, verticalAlignment = Alignment.Top, userScrollEnabled = appPlatform.isAndroid) { index ->
+          Column(
+            Modifier
+              .fillMaxWidth()
+              .heightIn(min = this@BoxWithConstraints.maxHeight - 150.dp),
+            verticalArrangement = if (index == NewChatOption.INVITE.ordinal && connLinkInvitation.connFullLink.isEmpty()) Arrangement.Center else Arrangement.Top
+          ) {
+            Spacer(Modifier.height(DEFAULT_PADDING))
+            when (index) {
+              NewChatOption.INVITE.ordinal -> {
+                PrepareAndInviteView(rh?.remoteHostId, contactConnection, connLinkInvitation, creatingConnReq)
+              }
+              NewChatOption.CONNECT.ordinal -> {
+                ConnectView(rh?.remoteHostId, showQRCodeScanner, pastedLink, close)
+              }
+            }
+            SectionBottomSpacer()
+          }
         }
       }
     }
@@ -163,12 +179,13 @@ fun ModalData.NewChatView(rh: RemoteHostInfo?, selection: NewChatOption, showQRC
 }
 
 @Composable
-private fun PrepareAndInviteView(rhId: Long?, contactConnection: MutableState<PendingContactConnection?>, connLinkInvitation: CreatedConnLink, creatingConnReq: MutableState<Boolean>) {
+private fun PrepareAndInviteView(rhId: Long?, contactConnection: MutableState<PendingContactConnection?>, connLinkInvitation: CreatedConnLink, creatingConnReq: MutableState<Boolean>, onboarding: Boolean = false) {
   if (connLinkInvitation.connFullLink.isNotEmpty()) {
     InviteView(
       rhId,
       connLinkInvitation = connLinkInvitation,
       contactConnection = contactConnection,
+      onboarding = onboarding,
     )
   } else if (creatingConnReq.value) {
     CreatingLinkProgressView()
@@ -379,14 +396,7 @@ fun ActiveProfilePicker(
         }
       },
       image = {
-        Spacer(Modifier.width(8.dp))
-        Icon(
-          painterResource(MR.images.ic_theater_comedy_filled),
-          contentDescription = stringResource(MR.strings.incognito),
-          Modifier.size(32.dp),
-          tint = Indigo,
-        )
-        Spacer(Modifier.width(2.dp))
+        IncognitoOptionImage()
       },
       onInfo = { ModalManager.start.showModal { IncognitoView() } },
     )
@@ -409,7 +419,10 @@ fun ActiveProfilePicker(
         val activeProfile = filteredProfiles.firstOrNull { it.activeUser }
 
         if (activeProfile != null) {
-          val otherProfiles = filteredProfiles.filter { it.userId != activeProfile.userId }
+          val otherProfiles =
+            filteredProfiles
+              .filter { it.userId != activeProfile.userId }
+              .sortedByDescending { it.activeOrder }
           item {
             when {
               !showIncognito ->
@@ -450,23 +463,53 @@ fun ActiveProfilePicker(
 }
 
 @Composable
-private fun InviteView(rhId: Long?, connLinkInvitation: CreatedConnLink, contactConnection: MutableState<PendingContactConnection?>) {
+private fun InviteView(rhId: Long?, connLinkInvitation: CreatedConnLink, contactConnection: MutableState<PendingContactConnection?>, onboarding: Boolean = false) {
   val showShortLink = remember { mutableStateOf(true) }
-  Spacer(Modifier.height(10.dp))
 
-  SectionView(stringResource(MR.strings.share_this_1_time_link).uppercase(), headerBottomPadding = 5.dp) {
+  if (BuildConfigCommon.SIMPLEX_ASSETS) {
+    Image(
+      painterResource(if (isInDarkTheme()) {
+        if (onboarding) MR.images.one_time_link_light else MR.images.one_time_link_small_light
+      } else {
+        if (onboarding) MR.images.one_time_link else MR.images.one_time_link_small
+      }),
+      contentDescription = null,
+      contentScale = ContentScale.Fit,
+      modifier = Modifier.fillMaxWidth()
+    )
+  } else {
+    Spacer(Modifier.height(10.dp))
+  }
+
+  if (onboarding) {
+    Text(
+      stringResource(MR.strings.onboarding_send_1_time_link),
+      Modifier.fillMaxWidth().padding(horizontal = DEFAULT_PADDING, vertical = DEFAULT_PADDING_HALF),
+      style = MaterialTheme.typography.body1
+    )
     LinkTextView(connLinkInvitation.simplexChatUri(short = showShortLink.value), true)
-  }
-
-  Spacer(Modifier.height(DEFAULT_PADDING))
-
-  SectionViewWithButton(
-    stringResource(MR.strings.or_show_this_qr_code).uppercase(),
-    titleButton = if (connLinkInvitation.connShortLink != null) {{ ToggleShortLinkButton(showShortLink) }} else null
-  ) {
+    Text(
+      stringResource(MR.strings.onboarding_or_show_qr_code),
+      Modifier.fillMaxWidth().padding(horizontal = DEFAULT_PADDING, vertical = DEFAULT_PADDING_HALF),
+      style = MaterialTheme.typography.body1
+    )
     SimpleXCreatedLinkQRCode(connLinkInvitation, short = showShortLink.value, onShare = { chatModel.markShowingInvitationUsed() })
+  } else {
+    SectionView(stringResource(MR.strings.share_this_1_time_link).uppercase(), headerBottomPadding = 5.dp) {
+      LinkTextView(connLinkInvitation.simplexChatUri(short = showShortLink.value), true)
+    }
+
+    Spacer(Modifier.height(DEFAULT_PADDING))
+
+    SectionViewWithButton(
+      stringResource(MR.strings.or_show_this_qr_code).uppercase(),
+      titleButton = if (connLinkInvitation.connShortLink != null) {{ ToggleShortLinkButton(showShortLink) }} else null
+    ) {
+      SimpleXCreatedLinkQRCode(connLinkInvitation, short = showShortLink.value, onShare = { chatModel.markShowingInvitationUsed() })
+    }
   }
 
+  if (!onboarding) {
   Spacer(Modifier.height(DEFAULT_PADDING))
   val incognito by remember(chatModel.showingInvitation.value?.conn?.incognito, controller.appPrefs.incognito.get()) {
     derivedStateOf {
@@ -533,18 +576,33 @@ private fun InviteView(rhId: Long?, connLinkInvitation: CreatedConnLink, contact
       SectionTextFooter(generalGetString(MR.strings.connect__a_new_random_profile_will_be_shared))
     }
   }
+  }
 }
 
 @Composable
 fun ToggleShortLinkButton(short: MutableState<Boolean>) {
-  Text(
-    stringResource(if (short.value) MR.strings.full_link_button_text else MR.strings.short_link_button_text),
-    modifier = Modifier.clickable(
-      interactionSource = remember { MutableInteractionSource() },
-      indication = null
-    ) { short.value = !short.value },
-    style = MaterialTheme.typography.body2, fontSize = 14.sp, color = MaterialTheme.colors.primary
+  if (appPrefs.developerTools.state.value) {
+    Text(
+      stringResource(if (short.value) MR.strings.full_link_button_text else MR.strings.short_link_button_text),
+      modifier = Modifier.clickable(
+        interactionSource = remember { MutableInteractionSource() },
+        indication = null
+      ) { short.value = !short.value },
+      style = MaterialTheme.typography.body2, fontSize = 14.sp, color = MaterialTheme.colors.primary
+    )
+  }
+}
+
+@Composable
+fun IncognitoOptionImage() {
+  Spacer(Modifier.width(8.dp))
+  Icon(
+    painterResource(MR.images.ic_theater_comedy_filled),
+    contentDescription = stringResource(MR.strings.incognito),
+    Modifier.size(32.dp),
+    tint = Indigo,
   )
+  Spacer(Modifier.width(2.dp))
 }
 
 @Composable
@@ -565,7 +623,26 @@ fun AddContactLearnMoreButton() {
 }
 
 @Composable
-private fun ConnectView(rhId: Long?, showQRCodeScanner: MutableState<Boolean>, pastedLink: MutableState<String>, close: () -> Unit) {
+private fun ConnectView(rhId: Long?, showQRCodeScanner: MutableState<Boolean>, pastedLink: MutableState<String>, close: () -> Unit, onboarding: Boolean = false) {
+  DisposableEffect(Unit) {
+    onDispose {
+      connectProgressManager.cancelConnectProgress()
+    }
+  }
+
+  if (BuildConfigCommon.SIMPLEX_ASSETS) {
+    Image(
+      painterResource(if (isInDarkTheme()) {
+        if (onboarding) MR.images.connect_via_link_light else MR.images.connect_via_link_small_light
+      } else {
+        if (onboarding) MR.images.connect_via_link else MR.images.connect_via_link_small
+      }),
+      contentDescription = null,
+      contentScale = ContentScale.Fit,
+      modifier = Modifier.fillMaxWidth()
+    )
+  }
+
   SectionView(stringResource(MR.strings.paste_the_link_you_received).uppercase(), headerBottomPadding = 5.dp) {
     PasteLinkView(rhId, pastedLink, showQRCodeScanner, close)
   }
@@ -606,10 +683,25 @@ private fun PasteLinkView(rhId: Long?, pastedLink: MutableState<String>, showQRC
         )
       }
     }) {
-      Text(stringResource(MR.strings.tap_to_paste_link))
+      Box(Modifier.weight(1f)) {
+        Text(stringResource(MR.strings.tap_to_paste_link), color = MaterialTheme.colors.primary)
+      }
+      if (connectProgressManager.showConnectProgress != null) {
+        CIFileViewScope.progressIndicator(sizeMultiplier = 0.6f)
+      }
     }
   } else {
-    LinkTextView(pastedLink.value, false)
+    Row(
+      Modifier.padding(end = DEFAULT_PADDING),
+      verticalAlignment = Alignment.CenterVertically
+    ) {
+      Box(Modifier.weight(1f)) {
+        LinkTextView(pastedLink.value, false)
+      }
+      if (connectProgressManager.showConnectProgress != null) {
+        CIFileViewScope.progressIndicator(sizeMultiplier = 0.6f)
+      }
+    }
   }
 }
 
@@ -651,6 +743,13 @@ fun LinkTextView(link: String, share: Boolean) {
       Spacer(Modifier.width(DEFAULT_PADDING))
       IconButton({
         chatModel.markShowingInvitationUsed()
+        clipboard.setText(AnnotatedString(link))
+      }, Modifier.size(20.dp)) {
+        Icon(painterResource(MR.images.ic_content_copy), null, tint = MaterialTheme.colors.primary)
+      }
+      Spacer(Modifier.width(DEFAULT_PADDING))
+      IconButton({
+        chatModel.markShowingInvitationUsed()
         clipboard.shareText(link)
       }, Modifier.size(20.dp)) {
         Icon(painterResource(MR.images.ic_share_filled), null, tint = MaterialTheme.colors.primary)
@@ -687,8 +786,7 @@ private suspend fun connect(rhId: Long?, link: String, close: () -> Unit, cleanu
     rhId,
     link,
     close = close,
-    cleanup = cleanup,
-    incognito = null
+    cleanup = cleanup
   ).await()
 
 private fun createInvitation(

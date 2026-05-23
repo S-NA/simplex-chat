@@ -5,14 +5,16 @@
 //  Created by JRoberts on 12/04/2022.
 //  Copyright © 2022 SimpleX Chat. All rights reserved.
 //
+// Spec: spec/client/chat-view.md
 
 import SwiftUI
 import SimpleXChat
 
+// Spec: spec/client/chat-view.md#CIImageView
 struct CIImageView: View {
     @EnvironmentObject var m: ChatModel
     let chatItem: ChatItem
-    var scrollToItemId: ((ChatItem.ID) -> Void)? = nil
+    var scrollToItem: ((ChatItem.ID) -> Void)? = nil
     var preview: UIImage?
     let maxWidth: CGFloat
     var imgWidth: CGFloat?
@@ -26,12 +28,14 @@ struct CIImageView: View {
             if let uiImage = getLoadedImage(file) {
                 Group { if smallView { smallViewImageView(uiImage) } else { imageView(uiImage) } }
                 .fullScreenCover(isPresented: $showFullScreenImage) {
-                    FullScreenMediaView(chatItem: chatItem, scrollToItemId: scrollToItemId, image: uiImage, showView: $showFullScreenImage)
+                    FullScreenMediaView(chatItem: chatItem, scrollToItem: scrollToItem, image: uiImage, showView: $showFullScreenImage)
                 }
                 .if(!smallView) { view in
                     view.modifier(PrivacyBlur(blurred: $blurred))
                 }
-                .onTapGesture { showFullScreenImage = true }
+                .if(!blurred) { v in
+                    v.simultaneousGesture(TapGesture().onEnded { showFullScreenImage = true })
+                }
                 .onChange(of: m.activeCallViewIsCollapsed) { _ in
                     showFullScreenImage = false
                 }
@@ -43,7 +47,7 @@ struct CIImageView: View {
                         imageView(preview).modifier(PrivacyBlur(blurred: $blurred))
                     }
                 }
-                    .onTapGesture {
+                    .simultaneousGesture(TapGesture().onEnded {
                         if let file = file {
                             switch file.fileStatus {
                             case .rcvInvitation, .rcvAborted:
@@ -80,7 +84,7 @@ struct CIImageView: View {
                             default: ()
                             }
                         }
-                    }
+                    })
             }
         }
         .onDisappear {
@@ -94,12 +98,13 @@ struct CIImageView: View {
             if img.imageData == nil {
                 Image(uiImage: img)
                         .resizable()
-                        .scaledToFit()
-                        .frame(width: w)
+                        .scaledToFill()
+                        .frame(width: w, height: w * heightRatio(img.size))
+                        .clipped()
             } else {
-                SwiftyGif(image: img)
-                        .frame(width: w, height: w * img.size.height / img.size.width)
-                        .scaledToFit()
+                SwiftyGif(image: img, contentMode: .scaleAspectFill)
+                        .frame(width: w, height: w * heightRatio(img.size))
+                        .clipped()
             }
             if !blurred || !showDownloadButton(chatItem.file?.fileStatus) {
                 loadingIndicator()
